@@ -1,20 +1,26 @@
-# Local Legal RAG System
-
-🚀 **Upgrade:** This system now uses a **2-stage retrieval pipeline (vector search + cross-encoder reranking)** for higher legal relevance and better grounding.
+# Legal RAG System
 
 A production-ready Retrieval-Augmented Generation (RAG) system for legal document analysis using local GPU inference with Qwen2.5-14B-Instruct and PostgreSQL pgvector database.
 
 ---
 
-## 🏗️ Architecture
+## Features
+
+- **2-Stage Retrieval**: Vector search + cross-encoder reranking for precision
+- **Multiple Query Modes**: Single query, interactive, chat with memory
+- **Document OCR**: Upload PDFs/images for analysis
+- **API Server**: FastAPI endpoints for chatbot integration
+- **Citation-First**: Grounded answers with legal citations
+
+---
+
+## Architecture
 
 ```
 User Query
  → Query Embedding (BGE-base)
  → Stage-1 Vector Search (pgvector + HNSW)
- → Candidate Chunks (broad recall)
  → Stage-2 Cross-Encoder Reranking
- → Top-K Chunks (precision filtered)
  → Prompt Builder
  → Qwen2.5-14B-Instruct (GPU)
  → Post-Processing
@@ -23,268 +29,145 @@ User Query
 
 ---
 
-## 🔎 Two-Stage Retrieval (Implemented)
-
-The system uses a **two-stage retrieval pipeline** to improve chunk relevance and reduce noisy context.
-
-### Stage-1 — Vector Candidate Retrieval
-- Embedding model: **BAAI/bge-base-en-v1.5 (768-dim)**
-- Similarity: cosine distance via pgvector
-- Index: HNSW
-- Fetches a wider candidate pool (default ≈ 30)
-- Optimized for **recall + speed**
-
-### Stage-2 — Cross-Encoder Reranking
-- Model: `cross-encoder/ms-marco-MiniLM-L-6-v2`
-- Scores each *(query, chunk)* pair jointly
-- Uses full transformer attention across query + chunk
-- Produces semantic relevance score
-- Reorders candidates
-- Keeps best top-K (default ≈ 8)
-
-**Effect:** Better ordering, stronger legal grounding, cleaner citations.
-
----
-
-## 📁 File Structure
+## File Structure
 
 ```
 rag_model/
-├── retriever.py          # Stage-1 vector retrieval layer
-├── reranker.py           # Stage-2 cross-encoder reranking
-├── prompt_builder.py     # RAG prompt construction  
-├── llm_inference.py      # Qwen2.5-14B inference engine
-├── post_processor.py     # Response cleaning & citations
-├── rag_pipeline.py       # Main orchestrator (2-stage pipeline)
-├── main.py               # CLI interface
-├── demo.py               # Quick demo without LLM
-├── requirements.txt      # Python dependencies
-└── README.md             # This file
+├── retriever.py            # Stage-1 vector retrieval
+├── reranker.py             # Stage-2 cross-encoder reranking
+├── prompt_builder.py       # RAG prompt construction
+├── llm_inference.py        # Qwen2.5 inference engine
+├── post_processor.py       # Response cleaning & citations
+├── document_processor.py   # PDF/image OCR
+├── rag_pipeline.py        # Main orchestrator
+├── api.py                  # FastAPI server
+├── main.py                 # CLI interface
+├── demo.py                 # Quick demo without LLM
+├── requirements.txt        # Dependencies
+├── .gitignore
+├── README.md
+└── AGENTS.md               # Agent guidelines
 ```
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
+
+### Installation
+
+```bash
+pip install -r requirements.txt
+
+# For OCR support (optional)
+pip install pytesseract pdf2image Pillow
+# macOS: brew install tesseract
+# Ubuntu: sudo apt-get install tesseract-ocr
+```
 
 ### Prerequisites
 
 - PostgreSQL with pgvector extension
 - GPU with ~48GB VRAM (for 14B model)
 - Python 3.8+
-- Legal documents embedded in `legal_rag` database
+- Database `legal_rag` with embedded judgments
 
 ---
 
-### Installation
+## Usage
+
+### CLI
 
 ```bash
-pip install -r requirements.txt
-```
+# Single query
+python main.py --query "What are the principles of natural justice?"
 
-Database expected:
-
-```
-legal_rag
- ├── judgments
- ├── judgment_chunks
- └── judgment_embeddings (vector(768))
-```
-
----
-
-## ▶️ Usage
-
-### Quick Demo (Retrieval Only)
-
-```bash
-python demo.py
-```
-
----
-
-### Full RAG System
-
-```bash
-python main.py --query "What are the regulations for educational institutions in Karnataka?"
+# Interactive mode
 python main.py --interactive
+
+# Chat mode (multi-turn with memory)
+python main.py --chat
+python main.py --chat --clear-history  # Fresh start
+
+# Document OCR
+python main.py --document case.pdf --query "Summarize this case"
+python main.py --document scan.jpg --no-retrieval  # OCR only
+
+# Test queries
 python main.py --test
 python main.py --retrieval-test
-python main.py --query "educational fees" --debug
+
+# Custom config
+python main.py --query "legal question" --top-k 10 --threshold 0.25 --debug
 ```
 
----
-
-### Advanced Configuration
+### API Server
 
 ```bash
-python main.py --query "natural justice" --top-k 10 --threshold 0.25
+python api.py
+# Runs at http://localhost:8000
+# Docs at http://localhost:8000/docs
 ```
 
----
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/query` | POST | Single query |
+| `/chat` | POST | Multi-turn chat |
+| `/chat/clear` | POST | Clear history |
+| `/chat/history` | GET | Get history |
+| `/document` | POST | OCR + query |
+| `/retrieval-test` | POST | Test retrieval |
+| `/status` | GET | System config |
 
-## 🔧 Configuration
-
-### Retrieval Layer
-
-**Embedding Model:** BAAI/bge-base-en-v1.5 (768-dim)  
-**Vector Metric:** Cosine similarity (pgvector)  
-**Stage-1 candidate_k:** 30 (configurable)  
-**Stage-2 final_k:** 8 (configurable)  
-**Reranker Model:** cross-encoder/ms-marco-MiniLM-L-6-v2  
-
----
-
-### LLM Inference
-
-**Model:** Qwen/Qwen2.5-14B-Instruct  
-**Precision:** FP16  
-**Max New Tokens:** 512  
-**Temperature:** 0.2  
-**Sampling:** Disabled  
-
----
-
-### Prompt Builder
-
-**Max Context Length:** 4000 characters  
-**Policy:** Strict RAG — *answer only from retrieved context*
-
----
-
-## 📊 Database Schema
-
-```sql
-judgments (
-    id, petitioner, respondent, court, date_of_judgment, 
-    bench, citations, judgment_text
-)
-
-judgment_chunks (
-    chunk_id, judgment_id, section, content
-)
-
-judgment_embeddings (
-    chunk_id, embedding vector(768)
-)
-```
-
-Sections:
-```
-facts | issues | arguments | ratio | judgment
-```
-
----
-
-## 🎯 Design Principles
-
-### Hallucination Prevention
-- Strict RAG prompt constraints
-- Context-only answering
-- Deterministic decoding
-- Fallback responses when evidence missing
-
----
-
-### Citation-First Design
-- Every chunk carries legal metadata
-- Automatic citation extraction
-- Deduplicated source lists
-
----
-
-### Modular Architecture
-- Each layer independently testable
-- Easy model swapping
-- Retrieval and generation decoupled
-
----
-
-### Performance Optimized
-- HNSW vector index
-- Batch embedding
-- GPU inference pipeline
-- 2-stage precision filtering
-
----
-
-## 📈 Metrics Tracked
-
-- Retrieval time
-- Reranking time
-- Generation time
-- Confidence score
-- Chunk similarity
-- Citation coverage
-
----
-
-## 🔍 Sample Usage
+### Python Usage
 
 ```python
 from rag_pipeline import LegalRAGPipeline
 
 pipeline = LegalRAGPipeline()
 
+# Single query
 result = pipeline.query("What are the principles of natural justice?")
 
+# Chat
+result = pipeline.chat("Tell me more about that")
+
+# Document
+result = pipeline.query_with_document("case.pdf", "Summarize this")
+
+# Access response
 print(result["answer"])
 print(result["confidence"])
-print(result["sources"])
+print(result["citations"])
 ```
 
 ---
 
-## 🛠️ Customization
+## Configuration
 
-### Swap Models
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `top_k` | 8 | Final chunks after reranking |
+| `similarity_threshold` | 0.3 | Minimum similarity |
+| `candidate_k` | 30 | Stage-1 pool size |
+| `max_context_length` | 4000 | Prompt character limit |
+| `max_new_tokens` | 512 | LLM output limit |
+| `model_name` | Qwen/Qwen2.5-7B-Instruct-1M | LLM model |
 
-```python
-pipeline = LegalRAGPipeline(model_name="Qwen/Qwen2.5-7B-Instruct")
+---
+
+## Database Schema
+
+```sql
+judgments (id, petitioner, respondent, court, date_of_judgment, bench, citations, judgment_text)
+judgment_chunks (chunk_id, judgment_id, section, content)
+judgment_embeddings (chunk_id, embedding vector(768))
 ```
 
----
-
-### Tune Retrieval
-
-```python
-pipeline = LegalRAGPipeline(top_k=12, similarity_threshold=0.25)
-```
+Sections: `facts | issues | arguments | ratio | judgment`
 
 ---
 
-## 📋 Known Limitations
-
-1. 14B model requires high VRAM
-2. Context window limited by prompt size
-3. Single-turn queries only
-4. English embedding optimized
-
----
-
-## 🚧 Future Extensions
-
-- Hybrid retrieval (BM25 + vector + reranker)
-- Multi-hop retrieval
-- Domain fine-tuning
-- Embedding caching
-- API server layer
-- Evaluation benchmark suite
-
----
-
-## 🔧 Debugging
-
-```bash
-python main.py --query "test" --debug
-python main.py --retrieval-test --query "educational fees"
-python retriever.py
-python prompt_builder.py
-python post_processor.py
-```
-
----
-
-## 📦 Requirements
+## Requirements
 
 ```
 torch>=2.0.0
@@ -294,20 +177,19 @@ accelerate>=0.25.0
 psycopg2-binary>=2.9.0
 numpy>=1.24.0
 tqdm>=4.65.0
+pytesseract>=0.3.10
+pdf2image>=1.16.3
+Pillow>=9.0.0
+fastapi>=0.100.0
+uvicorn>=0.23.0
+python-multipart>=0.0.6
 ```
 
 ---
 
-## ✅ Design Goals Met
+## Design Principles
 
-✅ 2-stage retrieval implemented  
-✅ Cross-encoder reranking integrated  
-✅ Reduced retrieval noise  
-✅ Citation-grounded answers  
-✅ GPU-optimized inference  
-✅ pgvector integration  
-✅ Modular + production-ready  
-
----
-
-The system now runs a **precision-focused 2-stage legal RAG pipeline** suitable for high-quality legal QA and scalable deployment.
+- **Hallucination Prevention**: Strict RAG, context-only answering
+- **Citation-First**: Grounded answers with legal citations
+- **Modular**: Each component independently testable
+- **Production-Ready**: Error handling, metrics, logging
