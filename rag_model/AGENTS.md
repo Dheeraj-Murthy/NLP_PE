@@ -1,10 +1,11 @@
-# AGENTS.md - Legal RAG System
+# Legal RAG System
 
-This file provides context for agentic coding assistants operating in this repository.
+**Generated:** 2026-03-09
+**Project:** Legal document RAG with Qwen2.5 + pgvector
 
-## Project Overview
+## Overview
 
-A production-ready Retrieval-Augmented Generation (RAG) system for legal document analysis using local GPU inference with Qwen2.5-14B-Instruct and PostgreSQL pgvector database. Uses 2-stage retrieval (vector search + cross-encoder reranking).
+Production-ready 2-stage RAG for legal judgments: vector search → cross-encoder rerank → LLM generation.
 
 ## Repository Structure
 
@@ -22,6 +23,27 @@ rag_model/
 ├── requirements.txt      # Python dependencies
 └── README.md             # Documentation
 ```
+
+## Deviations from Standard Python Project Layout
+
+This is a **flat project** - all source files in root, no subdirectories.
+
+| Standard Practice | This Project | Implication |
+|-------------------|--------------|-------------|
+| `src/` or `rag_model/` package dir | Root is package (has `__init__.py`) | Import via `from retriever import ...` |
+| `tests/` directory | No `tests/` folder | In-file `if __name__ == "__main__":` blocks |
+| `pyproject.toml` / `setup.py` | `requirements.txt` only | Manual pip install |
+| `.env` / `config.yaml` | Hardcoded defaults in classes | Edit source to configure |
+| GitHub Actions / CI | None | Manual testing only |
+| Dockerfile | None | No containerization |
+
+## Anti-Patterns (This Project)
+
+- **No formal test suite** - Uses manual `python file.py` testing
+- **No CI/CD** - No automated linting, testing, or deployment
+- **No environment config** - DB/model params hardcoded in constructors
+- **No logging module** - Print-based debugging
+- **Direct execution** - Runs via `python main.py`, not `python -m rag_model`
 
 ## Build, Run & Test Commands
 

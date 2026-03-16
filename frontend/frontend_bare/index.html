@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LegalRAG - AI Legal Assistant</title>
+    <link rel="stylesheet" href="styles.css">
+    <!-- Phosphor Icons for clean, professional iconography -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+</head>
+<body>
+    <header class="app-header">
+        <div class="brand">
+            <div class="brand-logo">§</div>
+            <div class="brand-title">LegalRAG</div>
+            <span class="brand-badge">AI Counsel</span>
+        </div>
+    </header>
+
+    <main class="app-main">
+        <!-- Left Panel: Document Context -->
+        <section class="context-panel">
+            <div class="panel-header">
+                <h2 class="panel-title">Document Context</h2>
+                <p class="panel-desc">Upload legal documents, case files, or contracts to analyze.</p>
+            </div>
+
+            <div class="upload-zone" id="drop-zone">
+                <i class="ph ph-file-pdf upload-icon"></i>
+                <div class="upload-text">Drag & drop files here</div>
+                <div class="upload-subtext">Supports PDF, DOCX, TXT (Max 50MB)</div>
+                <input type="file" id="file-input" class="file-input" multiple accept=".pdf,.docx,.txt">
+            </div>
+
+            <div class="file-list" id="file-list">
+                <!-- Uploaded files will appear here -->
+            </div>
+        </section>
+
+        <!-- Right Panel: Chat Interface -->
+        <section class="chat-panel">
+            <div class="chat-history" id="chat-history">
+                <!-- Initial Bot Message -->
+                <div class="message message-bot">
+                    <div class="message-avatar">§</div>
+                    <div class="message-content">
+                        Good day. I am your LegalRAG assistant. How may I assist you with your legal research or document analysis today?
+                    </div>
+                </div>
+            </div>
+
+            <div class="chat-input-container">
+                <div class="chat-input-wrapper">
+                    <textarea 
+                        id="chat-input" 
+                        class="chat-input" 
+                        placeholder="Ask a legal question or query your documents..." 
+                        rows="1"
+                    ></textarea>
+                    <button id="send-button" class="send-button" disabled>
+                        <i class="ph-bold ph-paper-plane-right"></i>
+                    </button>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
