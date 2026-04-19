@@ -1,9 +1,9 @@
 import os
 import re
 import json
+import subprocess
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
-import PyPDF2
 import psycopg2
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
@@ -29,13 +29,21 @@ def get_embedding(text: str):
         return None
 
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """Extract text from PDF file"""
-    text = ""
-    with open(pdf_path, 'rb') as file:
-        reader = PyPDF2.PdfReader(file)
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-    return text
+    """Extract text from PDF using pdftotext (poppler) - handles scanned PDFs too"""
+    try:
+        result = subprocess.run(
+            ['pdftotext', '-layout', pdf_path, '-'],
+            capture_output=True,
+            text=True,
+            timeout=60
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"pdftotext failed: {e}")
+    return ""
 
 def parse_judgment_metadata(text: str, filename: str) -> Dict[str, Any]:
     """Extract metadata from judgment text"""

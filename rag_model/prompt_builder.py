@@ -28,7 +28,6 @@ class PromptBuilder:
         
         context = "\n\n".join(context_parts)
         
-        # Qwen2.5 chat format
         prompt = f"""<|im_start|>system
 {self.SYSTEM_PROMPT}<|im_end|>
 <|im_start|>user

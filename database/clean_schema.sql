@@ -1,4 +1,7 @@
--- PostgreSQL schema for Legal RAG with BGE-base-en-v1.5 (768-dim vectors)
+-- Clean and recreate Legal RAG schema
+
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public;
 
 -- Enable vector extension
 CREATE EXTENSION IF NOT EXISTS vector;

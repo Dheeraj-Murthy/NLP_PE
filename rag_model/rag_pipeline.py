@@ -159,16 +159,9 @@ class LegalRAGPipeline:
                     return_length=True,
                 )["length"][0]
 
-            print(f"DEBUG prompt (first 500): {prompt[:500]}...")
-            print(f"DEBUG prompt_tokens: {prompt_tokens}")
-
             generation_start = time.time()
             raw_response = self.llm.generate_response(prompt)
             generation_time = time.time() - generation_start
-
-            print(f"DEBUG raw_response: '{raw_response[:500] if raw_response else 'EMPTY'}...'")
-            if retrieved_chunks:
-                print(f"DEBUG first chunk text: {retrieved_chunks[0].get('text', 'NO TEXT')[:200]}...")
 
             processed = self.post_processor.process_response(
                 raw_response, retrieved_chunks, user_query
