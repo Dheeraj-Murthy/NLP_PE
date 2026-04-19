@@ -66,14 +66,14 @@ class PostProcessor:
                 line = line.strip()
 
                 if skip_until_answer:
-                    if line.lower().startswith('answer:'):
+                    if line.lower().startswith('answer:') or line.lower().startswith('<|im_start|>assistant'):
                         skip_until_answer = False
-                        answer_part = line[7:].strip()
+                        answer_part = line.replace('<|im_start|>assistant', '').replace('<|im_end|>', '').strip()
                         if answer_part:
                             answer_lines.append(answer_part)
                     continue
 
-                if line.lower().startswith('context:') or line.lower().startswith('question:'):
+                if line.lower().startswith('context:') or line.lower().startswith('question:') or 'im_start' in line.lower():
                     continue
 
                 answer_lines.append(line)
