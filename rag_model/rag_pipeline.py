@@ -163,6 +163,8 @@ class LegalRAGPipeline:
             raw_response = self.llm.generate_response(prompt)
             generation_time = time.time() - generation_start
 
+            print(f"DEBUG raw_response: '{raw_response[:300] if raw_response else 'EMPTY'}...'")
+
             processed = self.post_processor.process_response(
                 raw_response, retrieved_chunks, user_query
             )
