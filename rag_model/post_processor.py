@@ -66,7 +66,7 @@ class PostProcessor:
                 line = line.strip()
 
                 if skip_until_answer:
-                    if line.lower().startswith('answer:') or line.lower().startswith('<|im_start|>assistant'):
+                    if line.lower().startswith('answer:') or '<|im_start|>assistant' in line.lower():
                         skip_until_answer = False
                         answer_part = line.replace('<|im_start|>assistant', '').replace('<|im_end|>', '').strip()
                         if answer_part:
@@ -78,6 +78,9 @@ class PostProcessor:
 
                 answer_lines.append(line)
 
+            if not answer_lines:
+                answer_lines = [response]
+
             response = '\n'.join(answer_lines)
 
         response = re.sub(r'\n{3,}', '\n\n', response)
@@ -86,20 +89,16 @@ class PostProcessor:
         return response.strip()
 
     def _check_answer_exists(self, answer: str) -> bool:
-        return True
         if not answer:
             return False
-
+        
         answer_lower = answer.lower()
-
-        for no_answer_phrase in self.NO_ANSWER_PHRASES:
-            if no_answer_phrase.lower() in answer_lower:
+        
+        for phrase in self.NO_ANSWER_PHRASES:
+            if phrase.lower() in answer_lower:
                 return False
-
-        if len(answer.split()) < 5:
-            return False
-
-        return True
+        
+        return len(answer.split()) >= 5
 
     def _calculate_confidence(
             self, 

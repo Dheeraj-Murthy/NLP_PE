@@ -8,6 +8,15 @@ import psycopg2
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 
+# Try importing OCR dependencies
+TESSERACT_AVAILABLE = False
+try:
+    import pytesseract
+    from pdf2image import convert_from_path
+    TESSERACT_AVAILABLE = True
+except ImportError:
+    pass
+
 # Initialize local embedding model
 try:
     embedding_model = SentenceTransformer('BAAI/bge-base-en-v1.5')
@@ -29,7 +38,9 @@ def get_embedding(text: str):
         return None
 
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """Extract text from PDF using pdftotext (poppler) - handles scanned PDFs too"""
+    text = ""
+    
+    # Try pdftotext first
     try:
         result = subprocess.run(
             ['pdftotext', '-layout', pdf_path, '-'],
@@ -37,13 +48,23 @@ def extract_text_from_pdf(pdf_path: str) -> str:
             text=True,
             timeout=60
         )
-        if result.returncode == 0 and result.stdout.strip():
+        if result.returncode == 0 and len(result.stdout.strip()) > 100:
             return result.stdout
-    except FileNotFoundError:
+    except Exception:
         pass
-    except Exception as e:
-        print(f"pdftotext failed: {e}")
-    return ""
+    
+    # Fallback to OCR if pdftotext returns little text
+    if TESSERACT_AVAILABLE:
+        try:
+            images = convert_from_path(pdf_path, dpi=300)
+            for image in images:
+                text += pytesseract.image_to_string(image) + "\n"
+            if len(text.strip()) > 100:
+                return text
+        except Exception as e:
+            print(f"OCR failed: {e}")
+    
+    return text
 
 def parse_judgment_metadata(text: str, filename: str) -> Dict[str, Any]:
     """Extract metadata from judgment text"""
