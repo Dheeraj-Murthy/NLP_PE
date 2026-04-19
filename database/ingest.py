@@ -36,10 +36,13 @@ def extract_text_from_pdf(pdf_path: str) -> str:
             text=True,
             timeout=60
         )
-        if result.returncode == 0 and result.stdout.strip():
+        if result.returncode != 0:
+            print(f"pdftotext error: {result.stderr}")
+        if result.stdout:
+            print(f"pdftotext got {len(result.stdout)} chars")
             return result.stdout
     except FileNotFoundError:
-        pass
+        print("pdftotext not found - install poppler-utils")
     except Exception as e:
         print(f"pdftotext failed: {e}")
     return ""
@@ -222,6 +225,8 @@ def ingest_judgment_from_pdf(pdf_path: str) -> int | None:
     
     # Extract text
     text = extract_text_from_pdf(pdf_path)
+    print(f"Extracted text length: {len(text)}")
+    print(f"Text preview: {text[:200]}...")
     if not text.strip():
         print(f"Warning: No text extracted from {pdf_path}")
         return None
