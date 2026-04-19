@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-"""Bare minimum test - just run Qwen model with a simple prompt."""
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -18,9 +17,6 @@ model = AutoModelForCausalLM.from_pretrained(
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
-print("Model loaded. Enter a prompt:")
-
-prompt = """<|im_start|>system
 prompt = """<|im_start|>system
 You are a helpful assistant.<|im_end|>
 <|im_start|>user
