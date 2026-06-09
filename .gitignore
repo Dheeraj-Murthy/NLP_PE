@@ -116,6 +116,7 @@ agents/
 .claude-cache/
 .opencode/
 .opencode-cache/
+.sisyphus/
 
 # =========================
 # Secrets
