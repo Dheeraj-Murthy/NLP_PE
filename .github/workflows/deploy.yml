@@ -1,0 +1,15 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Pull and redeploy
+        run: |
+          cd NLPv2
+          git pull
+          docker compose -f deploy/docker/docker-compose.yml up -d --build
