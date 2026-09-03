@@ -214,8 +214,15 @@ def chunk_judgment_text(text: str) -> List[Tuple[str, str]]:
     paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
     chunks = []
 
+    # Long stretches of text with no recognized section header (common in
+    # older judgments) would otherwise accumulate into a single oversized
+    # chunk — cap it so retrieval stays granular and the full chunk can
+    # actually fit in the LLM's context window later.
+    max_chunk_chars = 3000
+
     current_section = 'facts'
     current_section_text = []
+    current_section_length = 0
 
     for paragraph in paragraphs:
         identified_section = _identify_section_type(paragraph, section_identifiers)
@@ -223,9 +230,16 @@ def chunk_judgment_text(text: str) -> List[Tuple[str, str]]:
         if identified_section and identified_section != current_section and current_section_text:
             chunks.append((current_section, '\n'.join(current_section_text)))
             current_section_text = []
+            current_section_length = 0
             current_section = identified_section
 
+        if current_section_text and current_section_length + len(paragraph) > max_chunk_chars:
+            chunks.append((current_section, '\n'.join(current_section_text)))
+            current_section_text = []
+            current_section_length = 0
+
         current_section_text.append(paragraph)
+        current_section_length += len(paragraph)
 
     if current_section_text:
         chunks.append((current_section, '\n'.join(current_section_text)))
