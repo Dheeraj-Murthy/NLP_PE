@@ -19,10 +19,10 @@ class PromptBuilder:
         
         for i, chunk in enumerate(retrieved_chunks, 1):
             chunk_text = self._format_chunk_with_metadata(chunk, i)
-            
+
             if current_length + len(chunk_text) > self.max_context_length:
-                break
-            
+                continue
+
             context_parts.append(chunk_text)
             current_length += len(chunk_text)
         
@@ -55,7 +55,7 @@ Section: {chunk['section']}"""
         
         for chunk in retrieved_chunks:
             if current_length + len(chunk['text']) > self.max_context_length:
-                break
+                continue
             context_texts.append(chunk['text'])
             current_length += len(chunk['text'])
         
