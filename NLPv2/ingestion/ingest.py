@@ -30,6 +30,23 @@ def get_embedding(text: str):
         return None
 
 
+def get_embeddings_batch(texts: List[str]) -> List[Any]:
+    """Embed many chunks in one batched call instead of one .encode() per
+    chunk — at full-corpus scale (tens of thousands of judgments) unbatched
+    per-chunk calls turn into hundreds of thousands of individual GPU calls,
+    dominated by per-call overhead rather than actual compute."""
+    if not MODEL_AVAILABLE or not texts:
+        return [None] * len(texts)
+    try:
+        embeddings = embedding_model.encode(
+            texts, convert_to_numpy=True, batch_size=32, show_progress_bar=False
+        )
+        return [e.tolist() for e in embeddings]
+    except Exception as e:
+        print(f"Error generating batch embeddings: {e}")
+        return [None] * len(texts)
+
+
 def extract_text_from_pdf(pdf_path: str) -> str:
     try:
         result = subprocess.run(
@@ -355,6 +372,8 @@ def ingest_judgment_from_pdf(pdf_path: str) -> int | None:
 
         valid_sections = {'facts', 'issues', 'arguments', 'ratio', 'judgment'}
 
+        chunk_ids = []
+        chunk_texts = []
         for section, chunk_text in chunks:
             if section not in valid_sections:
                 section = 'judgment'
@@ -369,11 +388,14 @@ def ingest_judgment_from_pdf(pdf_path: str) -> int | None:
             )
 
             chunk_result = cur.fetchone()
-            chunk_id = chunk_result[0] if chunk_result else None
+            chunk_ids.append(chunk_result[0] if chunk_result else None)
+            chunk_texts.append(chunk_text)
 
-            # 6. Generate and store embedding
-            embedding = get_embedding(chunk_text)
+        # 6. Generate embeddings for every chunk in this judgment in one
+        # batched call instead of one .encode() per chunk.
+        embeddings = get_embeddings_batch(chunk_texts)
 
+        for chunk_id, embedding in zip(chunk_ids, embeddings):
             if embedding is not None:
                 cur.execute(
                     """
