@@ -238,6 +238,25 @@ def chunk_judgment_text(text: str) -> List[Tuple[str, str]]:
             current_section_text = []
             current_section_length = 0
 
+        if len(paragraph) > max_chunk_chars:
+            # A single "paragraph" (blank-line-delimited span) can itself be
+            # huge when pdftotext doesn't preserve blank lines well — split
+            # it on word boundaries so nothing bypasses the size cap.
+            words = paragraph.split()
+            piece = []
+            piece_length = 0
+            for word in words:
+                if piece_length + len(word) + 1 > max_chunk_chars and piece:
+                    chunks.append((current_section, ' '.join(piece)))
+                    piece = []
+                    piece_length = 0
+                piece.append(word)
+                piece_length += len(word) + 1
+            if piece:
+                current_section_text = [' '.join(piece)]
+                current_section_length = piece_length
+            continue
+
         current_section_text.append(paragraph)
         current_section_length += len(paragraph)
 
