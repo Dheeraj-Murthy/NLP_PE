@@ -16,16 +16,28 @@ class PromptBuilder:
     ) -> str:
         context_parts = []
         current_length = 0
-        
+        min_useful_budget = 200
+
         for i, chunk in enumerate(retrieved_chunks, 1):
+            remaining = self.max_context_length - current_length
+            if remaining <= min_useful_budget:
+                break
+
             chunk_text = self._format_chunk_with_metadata(chunk, i)
 
-            if current_length + len(chunk_text) > self.max_context_length:
-                continue
+            if len(chunk_text) > remaining:
+                # Truncate the chunk's own text (not the citation/section
+                # metadata) to fit what's left, rather than dropping a
+                # highly-ranked chunk in favor of a lower-ranked one that
+                # merely happens to be shorter.
+                overhead = len(chunk_text) - len(chunk["text"])
+                truncated = dict(chunk)
+                truncated["text"] = chunk["text"][: max(remaining - overhead, 0)] + "..."
+                chunk_text = self._format_chunk_with_metadata(truncated, i)
 
             context_parts.append(chunk_text)
             current_length += len(chunk_text)
-        
+
         context = "\n\n".join(context_parts)
         
         prompt = f"""<|im_start|>system
@@ -52,13 +64,20 @@ Section: {chunk['section']}"""
     def build_simple_prompt(self, retrieved_chunks: List[Dict[str, Any]], user_query: str) -> str:
         context_texts = []
         current_length = 0
-        
+        min_useful_budget = 200
+
         for chunk in retrieved_chunks:
-            if current_length + len(chunk['text']) > self.max_context_length:
-                continue
-            context_texts.append(chunk['text'])
-            current_length += len(chunk['text'])
-        
+            remaining = self.max_context_length - current_length
+            if remaining <= min_useful_budget:
+                break
+
+            text = chunk['text']
+            if len(text) > remaining:
+                text = text[:remaining] + "..."
+
+            context_texts.append(text)
+            current_length += len(text)
+
         context = "\n\n".join(context_texts)
         
         prompt = f"""Answer the following legal question using ONLY the provided context. If the answer is not found in the context, say "{self.NO_ANSWER_RESPONSE}".
