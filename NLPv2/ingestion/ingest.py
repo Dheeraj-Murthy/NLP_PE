@@ -323,8 +323,11 @@ def _create_size_based_chunks(text: str) -> List[Tuple[str, str]]:
     return chunks
 
 
-def ingest_judgment_from_pdf(pdf_path: str) -> int | None:
-    """Ingest a single PDF judgment into the database."""
+def ingest_judgment_from_pdf(pdf_path: str, conn) -> int | None:
+    """Ingest a single PDF judgment into the database, using a connection
+    shared across the whole ingestion run (see main()) rather than opening
+    a fresh one per document — at full-corpus scale that's tens of
+    thousands of avoidable connection setup/teardown round-trips."""
     print(f"Processing {pdf_path}...")
 
     # 1. Extract raw text
@@ -342,7 +345,6 @@ def ingest_judgment_from_pdf(pdf_path: str) -> int | None:
     # 3. Parse metadata from clean text
     metadata = parse_judgment_metadata(text, os.path.basename(pdf_path))
 
-    conn = psycopg2.connect("dbname=legal_rag")
     cur = conn.cursor()
 
     try:
@@ -428,7 +430,6 @@ def ingest_judgment_from_pdf(pdf_path: str) -> int | None:
         return None
     finally:
         cur.close()
-        conn.close()
 
 
 def main():
@@ -445,16 +446,20 @@ def main():
 
     print(f"Found {len(pdf_files)} PDF files to process...")
 
-    successful = 0
-    for pdf_file in pdf_files:
-        judgment_id = ingest_judgment_from_pdf(str(pdf_file))
-        if judgment_id:
-            successful += 1
+    conn = psycopg2.connect("dbname=legal_rag")
+    try:
+        successful = 0
+        for pdf_file in pdf_files:
+            judgment_id = ingest_judgment_from_pdf(str(pdf_file), conn)
+            if judgment_id:
+                successful += 1
 
-    print(
-        f"\nProcessing complete. "
-        f"Successfully ingested {successful}/{len(pdf_files)} judgments."
-    )
+        print(
+            f"\nProcessing complete. "
+            f"Successfully ingested {successful}/{len(pdf_files)} judgments."
+        )
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":
