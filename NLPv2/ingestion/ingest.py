@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
 import psycopg2
+from psycopg2.extras import execute_values
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 
@@ -39,7 +40,7 @@ def get_embeddings_batch(texts: List[str]) -> List[Any]:
         return [None] * len(texts)
     try:
         embeddings = embedding_model.encode(
-            texts, convert_to_numpy=True, batch_size=32, show_progress_bar=False
+            texts, convert_to_numpy=True, batch_size=128, show_progress_bar=False
         )
         return [e.tolist() for e in embeddings]
     except Exception as e:
@@ -372,43 +373,50 @@ def ingest_judgment_from_pdf(pdf_path: str) -> int | None:
 
         valid_sections = {'facts', 'issues', 'arguments', 'ratio', 'judgment'}
 
-        chunk_ids = []
-        chunk_texts = []
-        for section, chunk_text in chunks:
-            if section not in valid_sections:
-                section = 'judgment'
+        normalized_chunks = [
+            (section if section in valid_sections else 'judgment', chunk_text)
+            for section, chunk_text in chunks
+        ]
 
-            cur.execute(
-                """
-                INSERT INTO judgment_chunks (judgment_id, section, content)
-                VALUES (%s, %s, %s)
-                RETURNING chunk_id
-                """,
-                (judgment_id, section, chunk_text)
-            )
-
-            chunk_result = cur.fetchone()
-            chunk_ids.append(chunk_result[0] if chunk_result else None)
-            chunk_texts.append(chunk_text)
+        # 5b. Insert all of this judgment's chunks in one multi-row INSERT
+        # instead of one round-trip per chunk. execute_values with fetch=True
+        # returns the RETURNING rows in the same order the input rows were
+        # given, so chunk_ids lines up positionally with normalized_chunks.
+        chunk_rows = execute_values(
+            cur,
+            """
+            INSERT INTO judgment_chunks (judgment_id, section, content)
+            VALUES %s
+            RETURNING chunk_id
+            """,
+            [(judgment_id, section, chunk_text) for section, chunk_text in normalized_chunks],
+            fetch=True,
+        )
+        chunk_ids = [row[0] for row in chunk_rows]
+        chunk_texts = [chunk_text for _, chunk_text in normalized_chunks]
 
         # 6. Generate embeddings for every chunk in this judgment in one
         # batched call instead of one .encode() per chunk.
         embeddings = get_embeddings_batch(chunk_texts)
 
-        for chunk_id, embedding in zip(chunk_ids, embeddings):
-            if embedding is not None:
-                cur.execute(
-                    """
-                    INSERT INTO judgment_embeddings (chunk_id, embedding)
-                    VALUES (%s, %s)
-                    """,
-                    (chunk_id, embedding)
-                )
-            else:
-                print(
-                    f"Warning: No embedding generated for chunk {chunk_id} "
-                    "(BGE model unavailable)"
-                )
+        embedding_rows = [
+            (chunk_id, embedding)
+            for chunk_id, embedding in zip(chunk_ids, embeddings)
+            if embedding is not None
+        ]
+        missing = len(chunk_ids) - len(embedding_rows)
+        if missing:
+            print(f"Warning: {missing} chunk(s) had no embedding generated (BGE model unavailable)")
+
+        if embedding_rows:
+            execute_values(
+                cur,
+                """
+                INSERT INTO judgment_embeddings (chunk_id, embedding)
+                VALUES %s
+                """,
+                embedding_rows,
+            )
 
         conn.commit()
         print(f"Successfully ingested {pdf_path} with {len(chunks)} chunks")
