@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import argparse
 import subprocess
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
@@ -433,15 +434,25 @@ def ingest_judgment_from_pdf(pdf_path: str, conn) -> int | None:
 
 
 def main():
-    """Process all PDFs in the fixtures/sample_judgments/ directory."""
-    test_dir = Path("fixtures/sample_judgments")
-    if not test_dir.exists():
-        print("Test directory not found!")
+    """Process all PDFs in the given --input directory (defaults to the
+    bundled fixtures/sample_judgments/ set for a quick smoke test)."""
+    parser = argparse.ArgumentParser(description="Ingest judgment PDFs into Postgres")
+    parser.add_argument(
+        "--input",
+        type=str,
+        default="fixtures/sample_judgments",
+        help="Directory of PDF files to ingest (default: fixtures/sample_judgments)",
+    )
+    args = parser.parse_args()
+
+    input_dir = Path(args.input)
+    if not input_dir.exists():
+        print(f"Input directory not found: {input_dir}")
         return
 
-    pdf_files = list(test_dir.glob("*.pdf"))
+    pdf_files = list(input_dir.glob("*.pdf"))
     if not pdf_files:
-        print("No PDF files found in test directory!")
+        print(f"No PDF files found in {input_dir}")
         return
 
     print(f"Found {len(pdf_files)} PDF files to process...")
