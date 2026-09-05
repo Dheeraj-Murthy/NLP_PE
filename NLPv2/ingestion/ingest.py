@@ -452,7 +452,13 @@ def main():
 
     print(f"Found {len(pdf_files)} PDF files to process...")
 
-    conn = psycopg2.connect("dbname=legal_rag")
+    conn = psycopg2.connect(
+        host=os.environ.get("DB_HOST", "localhost"),
+        port=os.environ.get("DB_PORT", "5433"),
+        dbname=os.environ.get("DB_NAME", "legal_rag"),
+        user=os.environ.get("DB_USER", "postgres"),
+        password=os.environ.get("DB_PASSWORD", "postgres"),
+    )
     try:
         successful = 0
         progress = tqdm(pdf_files, desc="Ingesting", unit="doc")
