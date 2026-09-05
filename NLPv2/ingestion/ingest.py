@@ -9,6 +9,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
 
 # Initialize local embedding model
 try:
@@ -58,14 +59,13 @@ def extract_text_from_pdf(pdf_path: str) -> str:
             timeout=60
         )
         if result.returncode != 0:
-            print(f"pdftotext error: {result.stderr}")
+            tqdm.write(f"pdftotext error: {result.stderr}")
         if result.stdout:
-            print(f"pdftotext got {len(result.stdout)} chars")
             return result.stdout
     except FileNotFoundError:
-        print("pdftotext not found - install poppler-utils")
+        tqdm.write("pdftotext not found - install poppler-utils")
     except Exception as e:
-        print(f"pdftotext failed: {e}")
+        tqdm.write(f"pdftotext failed: {e}")
     return ""
 
 
@@ -329,19 +329,15 @@ def ingest_judgment_from_pdf(pdf_path: str, conn) -> int | None:
     shared across the whole ingestion run (see main()) rather than opening
     a fresh one per document — at full-corpus scale that's tens of
     thousands of avoidable connection setup/teardown round-trips."""
-    print(f"Processing {pdf_path}...")
-
     # 1. Extract raw text
     raw_text = extract_text_from_pdf(pdf_path)
     if not raw_text.strip():
-        print(f"Warning: No text extracted from {pdf_path}")
+        tqdm.write(f"Warning: No text extracted from {pdf_path}")
         return None
 
     # 2. Clean BEFORE anything else — metadata parsing, chunking, and DB storage
     #    all operate on the same clean text.
     text = clean_judgment_text(raw_text)
-    print(f"Text length after cleaning: {len(text)}")
-    print(f"Text preview: {text[:200]}...")
 
     # 3. Parse metadata from clean text
     metadata = parse_judgment_metadata(text, os.path.basename(pdf_path))
@@ -409,7 +405,7 @@ def ingest_judgment_from_pdf(pdf_path: str, conn) -> int | None:
         ]
         missing = len(chunk_ids) - len(embedding_rows)
         if missing:
-            print(f"Warning: {missing} chunk(s) had no embedding generated (BGE model unavailable)")
+            tqdm.write(f"Warning: {missing} chunk(s) had no embedding generated (BGE model unavailable)")
 
         if embedding_rows:
             execute_values(
@@ -422,12 +418,11 @@ def ingest_judgment_from_pdf(pdf_path: str, conn) -> int | None:
             )
 
         conn.commit()
-        print(f"Successfully ingested {pdf_path} with {len(chunks)} chunks")
         return judgment_id
 
     except Exception as e:
         conn.rollback()
-        print(f"Error processing {pdf_path}: {e}")
+        tqdm.write(f"Error processing {pdf_path}: {e}")
         return None
     finally:
         cur.close()
@@ -460,10 +455,12 @@ def main():
     conn = psycopg2.connect("dbname=legal_rag")
     try:
         successful = 0
-        for pdf_file in pdf_files:
+        progress = tqdm(pdf_files, desc="Ingesting", unit="doc")
+        for pdf_file in progress:
             judgment_id = ingest_judgment_from_pdf(str(pdf_file), conn)
             if judgment_id:
                 successful += 1
+            progress.set_postfix(ok=successful, failed=progress.n + 1 - successful)
 
         print(
             f"\nProcessing complete. "
