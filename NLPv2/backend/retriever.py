@@ -92,7 +92,10 @@ class LegalRetriever:
                 ) = row
 
                 case_name = self._format_case_name(petitioner, respondent)
-                para_id = f"¶{chunk_id}"
+                # chunk_id is a global DB row id, not a paragraph number within
+                # this judgment — label it honestly rather than implying a
+                # real ¶N citation the source text doesn't actually support.
+                para_id = f"(chunk {chunk_id})"
 
                 retrieved_chunks.append(
                     {
@@ -166,7 +169,10 @@ class LegalRetriever:
                 ) = row
 
                 case_name = self._format_case_name(petitioner, respondent)
-                para_id = f"¶{chunk_id}"
+                # chunk_id is a global DB row id, not a paragraph number within
+                # this judgment — label it honestly rather than implying a
+                # real ¶N citation the source text doesn't actually support.
+                para_id = f"(chunk {chunk_id})"
 
                 retrieved_chunks.append(
                     {
@@ -233,7 +239,10 @@ class LegalRetriever:
                 ) = row
 
                 case_name = self._format_case_name(petitioner, respondent)
-                para_id = f"¶{chunk_id}"
+                # chunk_id is a global DB row id, not a paragraph number within
+                # this judgment — label it honestly rather than implying a
+                # real ¶N citation the source text doesn't actually support.
+                para_id = f"(chunk {chunk_id})"
 
                 retrieved_chunks.append(
                     {
