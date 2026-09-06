@@ -5,9 +5,21 @@ from typing import List, Dict, Any, Optional, Tuple
 from sentence_transformers import SentenceTransformer
 
 
+def _default_db_connection_string() -> str:
+    """Build the default DSN from env vars, matching the docker-compose api
+    service's DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD, so this also works
+    when run directly on the host against the dockerized postgres."""
+    host = os.environ.get("DB_HOST", "localhost")
+    port = os.environ.get("DB_PORT", "5433")
+    dbname = os.environ.get("DB_NAME", "legal_rag")
+    user = os.environ.get("DB_USER", "postgres")
+    password = os.environ.get("DB_PASSWORD", "postgres")
+    return f"host={host} port={port} dbname={dbname} user={user} password={password}"
+
+
 class LegalRetriever:
-    def __init__(self, db_connection_string: str = "dbname=legal_rag"):
-        self.db_connection_string = db_connection_string
+    def __init__(self, db_connection_string: Optional[str] = None):
+        self.db_connection_string = db_connection_string or _default_db_connection_string()
         self.embedding_model = None
         self._load_embedding_model()
 

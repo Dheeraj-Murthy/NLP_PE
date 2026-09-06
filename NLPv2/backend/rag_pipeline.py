@@ -81,7 +81,7 @@ class ChatSession:
 class LegalRAGPipeline:
     def __init__(
         self,
-        db_connection_string: str = "dbname=legal_rag",
+        db_connection_string: Optional[str] = None,
         model_name: str = "Qwen/Qwen2.5-7B-Instruct-1M",
         load_llm: bool = True,
         top_k: int = 8,
