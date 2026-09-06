@@ -2,7 +2,12 @@ from typing import List, Dict, Any
 
 class PromptBuilder:
     
-    SYSTEM_PROMPT = "You are a legal assistant. Answer ONLY using the provided context. If the answer is not present, say: \"Not found in the provided cases.\""
+    SYSTEM_PROMPT = (
+        "You are a legal assistant. Answer ONLY using the provided context. "
+        "Each context item is numbered like [1], [2], etc. — cite the item number "
+        "in brackets, e.g. [1], immediately after any claim you draw from it. "
+        "If the answer is not present, say: \"Not found in the provided cases.\""
+    )
     
     NO_ANSWER_RESPONSE = "Not found in the provided cases."
     
