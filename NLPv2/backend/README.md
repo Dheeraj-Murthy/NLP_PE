@@ -1,6 +1,6 @@
 # Legal RAG System
 
-A production-ready Retrieval-Augmented Generation (RAG) system for legal document analysis using local GPU inference with Qwen2.5-14B-Instruct and PostgreSQL pgvector database.
+A production-ready Retrieval-Augmented Generation (RAG) system for legal document analysis using local GPU inference with Qwen2.5-7B-Instruct-1M and PostgreSQL pgvector database.
 
 ---
 
@@ -22,7 +22,7 @@ User Query
  → Stage-1 Vector Search (pgvector + HNSW)
  → Stage-2 Cross-Encoder Reranking
  → Prompt Builder
- → Qwen2.5-14B-Instruct (GPU)
+ → Qwen2.5-7B-Instruct-1M (GPU)
  → Post-Processing
  → Answer + Citations
 ```

@@ -63,30 +63,33 @@ citizens checking case context.
 
 ```
 User Query
-  → BGE Embedding (768d)
-  → Stage 1: pgvector Cosine Search (candidate_k=30, threshold=0.2)
+  → BGE Embedding (768d) + BM25 TSQuery
+  → Stage 1: Hybrid Retrieval (pgvector Cosine + BM25 via RRF, candidate_k=30)
   → Stage 2: Cross-Encoder Reranking (top_k=8)
-  → Prompt Builder (Qwen chat template)
+  → Prompt Builder (Qwen chat template with bracketed context citations)
   → Qwen2.5-7B-Instruct-1M (GPU, greedy decoding)
-  → Post-Processor (citation extraction, quality checks)
+  → Post-Processor (citation extraction, chunk mapping, quality checks)
   → Answer + Citations
 ```
 
-1. **Stage 1 — High-Recall Retrieval**: Query is embedded with
+1. **Stage 1 — High-Recall Hybrid Retrieval**: Query is embedded with
    `BAAI/bge-base-en-v1.5`. PostgreSQL/pgvector performs cosine similarity
-   search over 768-dimensional judgment chunk embeddings with HNSW index.
-   Returns 30 candidates at threshold 0.2.
+   search over 768-dimensional judgment chunk embeddings with an HNSW index.
+   This is fused with Postgres full-text BM25 search (`content_tsv` GIN index)
+   using Reciprocal Rank Fusion (RRF, `rrf_k=60`) to return 30 top candidates,
+   ensuring high recall for both semantic queries and exact statutory terms.
 
 2. **Stage 2 — Reranking**: Cross-encoder
    (`cross-encoder/ms-marco-MiniLM-L-6-v2`) scores each candidate pair (query,
    chunk). Top 8 are selected by relevance.
 
 3. **Generation**: Selected chunks are formatted into a Qwen-instruct prompt
-   with strict system instruction: _"Answer ONLY using the provided context."_
+   with strict system instructions for bracketed context citations (`[1]`, `[2]`)
+   and grounded answers: _"Answer ONLY using the provided context."_
    The LLM runs with `temperature=0.2, do_sample=False` for deterministic,
    grounded output.
 
-4. **Post-Processing**: Citations are extracted from the response text,
+4. **Post-Processing**: Citations and chunk IDs are extracted from response text,
    confidence scores computed from embedding similarity and lexical overlap, and
    quality metrics reported.
 
@@ -301,11 +304,12 @@ print(result["confidence"])   # Confidence score [0, 1]
 
 ## Project Status
 
-- [x] Core RAG pipeline (retriever -> reranker -> LLM -> post-processor)
-- [x] PostgreSQL/pgvector integration with HNSW index
+- [x] Core 2-stage RAG pipeline (retriever -> reranker -> LLM -> post-processor)
+- [x] Hybrid retrieval fusing pgvector dense search with BM25 sparse search via Reciprocal Rank Fusion (RRF)
+- [x] PostgreSQL/pgvector integration with HNSW and GIN indexes
 - [x] FastAPI server with 7 API endpoints
 - [x] CLI interface supporting query, interactive, chat, and test modes
-- [x] PDF ingestion pipeline with metadata extraction
+- [x] PDF ingestion pipeline with metadata extraction and batched DB/embedding writes
 - [x] Docker Compose orchestrating database, backend API, and frontend
 - [x] OCR support for scanned judgment documents
 - [x] Dual frontend interfaces (Next.js web UI and static fallback)
@@ -322,8 +326,6 @@ print(result["confidence"])   # Confidence score [0, 1]
   legal petitions grounded in retrieved case law.
 - **Fine-tuned Legal Models**: Instruction-tune a smaller LLM on Indian legal
   question-answer pairs for reduced cost and improved accuracy.
-- **Hybrid Retrieval**: Combine dense vector search with sparse keyword
-  retrieval (BM25) for improved recall.
 - **Multilingual Support**: Extend to Indian regional language judgments.
 - **High Court Integration**: Expand beyond Supreme Court to Karnataka, Delhi,
   Bombay, and other High Courts.
