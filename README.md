@@ -301,18 +301,18 @@ print(result["confidence"])   # Confidence score [0, 1]
 
 ## Project Status
 
-- ✅ Core RAG pipeline (retriever → reranker → LLM → post-processor)
-- ✅ PostgreSQL/pgvector integration with HNSW index
-- ✅ FastAPI server with 7 endpoints
-- ✅ CLI with single, interactive, chat, and test modes
-- ✅ PDF ingestion pipeline with metadata parsing
-- ✅ Docker Compose deployment (postgres + api + frontend)
-- ✅ OCR support for scanned documents
-- ✅ Multiple frontends (Next.js chatbot + bare HTML/JS)
-- 🔄 Web scraper for Karnataka High Court judgments
-- 🔄 LegalParam model integration
-- 📝 No automated tests or CI/CD yet
-- 📝 No production monitoring/logging infrastructure
+- [x] Core RAG pipeline (retriever -> reranker -> LLM -> post-processor)
+- [x] PostgreSQL/pgvector integration with HNSW index
+- [x] FastAPI server with 7 API endpoints
+- [x] CLI interface supporting query, interactive, chat, and test modes
+- [x] PDF ingestion pipeline with metadata extraction
+- [x] Docker Compose orchestrating database, backend API, and frontend
+- [x] OCR support for scanned judgment documents
+- [x] Dual frontend interfaces (Next.js web UI and static fallback)
+- [ ] [In Progress] Web scraper for Karnataka High Court judgments
+- [ ] [In Progress] LegalParam model integration
+- [ ] [Planned] Automated test suite and CI/CD pipelines
+- [ ] [Planned] Production monitoring and logging infrastructure
 
 ---
 
