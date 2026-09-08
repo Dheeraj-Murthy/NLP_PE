@@ -342,3 +342,10 @@ print(result["confidence"])   # Confidence score [0, 1]
 This system is a research and productivity tool. It does **not** provide legal
 advice. All responses should be verified against original case law by qualified
 legal professionals.
+
+---
+
+## Contributors
+
+- M S Dheeraj Murthy
+- Mathew Joseph
