@@ -104,7 +104,7 @@ class LegalRAGPipeline:
                 model_name=model_name,
                 max_new_tokens=max_new_tokens,
                 temperature=0.2,
-                do_sample=False,
+                do_sample=True,
             )
 
         self.post_processor = PostProcessor()

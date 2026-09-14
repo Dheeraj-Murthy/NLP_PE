@@ -13,7 +13,7 @@ class QwenInference:
         max_new_tokens: int = 512,
         temperature: float = 0.2,
         top_p: float = 0.9,
-        do_sample: bool = False
+        do_sample: bool = True
     ):
         self.model_name = model_name
         self.device_map = device_map
@@ -61,10 +61,10 @@ class QwenInference:
         if not self.model or not self.tokenizer:
             raise RuntimeError("Model not loaded")
         
-        max_new_tokens = max_new_tokens or self.max_new_tokens
-        temperature = temperature or self.temperature
-        top_p = top_p or self.top_p
-        do_sample = do_sample or self.do_sample
+        max_new_tokens = max_new_tokens if max_new_tokens is not None else self.max_new_tokens
+        temperature = temperature if temperature is not None else self.temperature
+        top_p = top_p if top_p is not None else self.top_p
+        do_sample = do_sample if do_sample is not None else self.do_sample
         
         try:
             inputs = self.tokenizer.encode(prompt, return_tensors="pt").to(self.model.device)
