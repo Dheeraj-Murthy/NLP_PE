@@ -85,6 +85,11 @@ CREATE TABLE IF NOT EXISTS citation_edges (
 CREATE INDEX IF NOT EXISTS idx_citation_edges_source ON citation_edges(source_judgment_id);
 CREATE INDEX IF NOT EXISTS idx_citation_edges_target ON citation_edges(target_judgment_id);
 
+-- Prevent duplicate edges on re-runs; NULL targets fold to a sentinel so
+-- unresolved citations are deduplicated too.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_citation_edges_unique
+    ON citation_edges(source_judgment_id, COALESCE(target_judgment_id, -1), cited_text);
+
 -- Show created tables
 \dt
 SELECT 'Database initialized successfully!' as status;

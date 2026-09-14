@@ -60,6 +60,11 @@ def populate_citation_edges():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+        # Dedupe guard for re-runs
+        cur.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_citation_edges_unique
+            ON citation_edges(source_judgment_id, COALESCE(target_judgment_id, -1), cited_text);
+        """)
         conn.commit()
 
         # Fetch judgment texts to extract citations
@@ -99,7 +104,8 @@ def populate_citation_edges():
                         """
                         INSERT INTO citation_edges
                         (source_judgment_id, target_judgment_id, cited_text, relationship_type)
-                        VALUES (%s, %s, %s, %s);
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING;
                         """,
                         insert_batch,
                     )
@@ -114,7 +120,8 @@ def populate_citation_edges():
                 """
                 INSERT INTO citation_edges
                 (source_judgment_id, target_judgment_id, cited_text, relationship_type)
-                VALUES (%s, %s, %s, %s);
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING;
                 """,
                 insert_batch,
             )
