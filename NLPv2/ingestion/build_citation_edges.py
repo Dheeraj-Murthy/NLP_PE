@@ -45,6 +45,10 @@ def populate_citation_edges():
         judgments_meta = [dict(r) for r in judgments_meta_raw]
         print(f"Loaded metadata for {len(judgments_meta)} judgments.")
 
+        # Build O(1) lookup index on petitioner / case names
+        extractor.build_lookup_index(judgments_meta)
+        print("Built case-name lookup index.")
+
         # Ensure citation_edges table exists
         cur.execute("""
             CREATE TABLE IF NOT EXISTS citation_edges (
@@ -63,35 +67,62 @@ def populate_citation_edges():
         judgments_data = cur.fetchall()
 
         total_edges_inserted = 0
+        total_judgments_with_citations = 0
 
-        for row in judgments_data:
+        batch_size = 500
+        insert_batch = []
+
+        for idx, row in enumerate(judgments_data, start=1):
             source_id = row["id"]
             text = row["judgment_text"] or ""
             if not text:
                 continue
 
             extracted_citations = extractor.extract_citations(text)
-            if not extracted_citations:
-                continue
+            if extracted_citations:
+                total_judgments_with_citations += 1
 
             for cit in extracted_citations:
                 cited_text = cit["cited_text"]
                 rel_type = cit["relationship_type"]
 
-                # Try to resolve target judgment ID
-                target_id = extractor.match_target_judgment(cited_text, judgments_meta)
+                # Try to resolve target judgment ID via O(1) index
+                target_id = extractor.match_target_judgment(cited_text)
 
-                cur.execute(
-                    """
-                    INSERT INTO citation_edges (source_judgment_id, target_judgment_id, cited_text, relationship_type)
-                    VALUES (%s, %s, %s, %s);
-                    """,
-                    (source_id, target_id, cited_text, rel_type),
+                insert_batch.append(
+                    (source_id, target_id, cited_text, rel_type)
                 )
                 total_edges_inserted += 1
 
+                if len(insert_batch) >= batch_size:
+                    cur.executemany(
+                        """
+                        INSERT INTO citation_edges
+                        (source_judgment_id, target_judgment_id, cited_text, relationship_type)
+                        VALUES (%s, %s, %s, %s);
+                        """,
+                        insert_batch,
+                    )
+                    insert_batch.clear()
+
+            if idx % 2000 == 0 or idx == len(judgments_data):
+                print(f"  Progress: {idx}/{len(judgments_data)} judgments scanned, "
+                      f"{total_edges_inserted} edges inserted so far.")
+
+        if insert_batch:
+            cur.executemany(
+                """
+                INSERT INTO citation_edges
+                (source_judgment_id, target_judgment_id, cited_text, relationship_type)
+                VALUES (%s, %s, %s, %s);
+                """,
+                insert_batch,
+            )
+
         conn.commit()
-        print(f"Successfully processed {len(judgments_data)} judgments and inserted {total_edges_inserted} citation edges.")
+        print(f"Successfully processed {len(judgments_data)} judgments "
+              f"({total_judgments_with_citations} with citations) and inserted "
+              f"{total_edges_inserted} citation edges.")
 
     conn.close()
 

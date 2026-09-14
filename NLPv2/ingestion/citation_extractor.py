@@ -34,6 +34,23 @@ class CitationExtractor:
         self.compiled_citation_res = [
             re.compile(p, re.IGNORECASE) for p in self.CITATION_PATTERNS
         ]
+        self.lookup_index: Dict[str, int] = {}
+
+    def build_lookup_index(self, judgments_metadata: List[Dict[str, Any]]) -> None:
+        """Build O(1) hash table for fast case name and citation matching."""
+        self.lookup_index.clear()
+        for j in judgments_metadata:
+            j_id = j["id"]
+            petitioner = (j.get("petitioner") or "").lower().strip()
+            respondent = (j.get("respondent") or "").lower().strip()
+
+            if petitioner and len(petitioner) > 3:
+                self.lookup_index[petitioner] = j_id
+                if respondent and len(respondent) > 3:
+                    full_name = f"{petitioner} v. {respondent}"
+                    self.lookup_index[full_name] = j_id
+                    full_name_vs = f"{petitioner} vs {respondent}"
+                    self.lookup_index[full_name_vs] = j_id
 
     def extract_citations(self, text: str) -> List[Dict[str, Any]]:
         """
@@ -82,25 +99,33 @@ class CitationExtractor:
         return "cited"
 
     def match_target_judgment(
-        self, cited_text: str, judgments_metadata: List[Dict[str, Any]]
+        self, cited_text: str, judgments_metadata: Optional[List[Dict[str, Any]]] = None
     ) -> Optional[int]:
         """
-        Try to match a cited text string to a target judgment ID from DB metadata pool.
+        Try to match a cited text string to a target judgment ID. Uses O(1) index if built.
         """
-        cited_clean = re.sub(r"\s+", " ", cited_text).lower()
+        cited_clean = re.sub(r"\s+", " ", cited_text).lower().strip()
 
-        for j in judgments_metadata:
-            j_id = j["id"]
-            petitioner = (j.get("petitioner") or "").lower()
-            respondent = (j.get("respondent") or "").lower()
+        # O(1) lookup check
+        if cited_clean in self.lookup_index:
+            return self.lookup_index[cited_clean]
 
-            # Check if petitioner and respondent appear in cited text
-            if petitioner and respondent and len(petitioner) > 2 and len(respondent) > 2:
-                if petitioner in cited_clean and respondent in cited_clean:
-                    return j_id
-
-            # Check if full case name matches petitioner v. respondent pattern
-            if petitioner and len(petitioner) > 3 and petitioner in cited_clean:
+        # Partial lookup check on indexed keys
+        for key, j_id in self.lookup_index.items():
+            if len(key) > 5 and key in cited_clean:
                 return j_id
+
+        if judgments_metadata:
+            for j in judgments_metadata:
+                j_id = j["id"]
+                petitioner = (j.get("petitioner") or "").lower()
+                respondent = (j.get("respondent") or "").lower()
+
+                if petitioner and respondent and len(petitioner) > 2 and len(respondent) > 2:
+                    if petitioner in cited_clean and respondent in cited_clean:
+                        return j_id
+
+                if petitioner and len(petitioner) > 3 and petitioner in cited_clean:
+                    return j_id
 
         return None
