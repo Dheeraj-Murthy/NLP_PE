@@ -11,7 +11,7 @@ class QwenInference:
         device_map: str = "auto",
         torch_dtype: torch.dtype = torch.float16,
         max_new_tokens: int = 512,
-        temperature: float = 0.7,
+        temperature: float = 0.9,
         top_p: float = 0.9,
         do_sample: bool = True
     ):

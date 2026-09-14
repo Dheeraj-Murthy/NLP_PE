@@ -103,7 +103,7 @@ class LegalRAGPipeline:
             self.llm = QwenInference(
                 model_name=model_name,
                 max_new_tokens=max_new_tokens,
-                temperature=0.7,
+                temperature=0.9,
                 top_p=0.9,
                 do_sample=True,
             )
@@ -182,6 +182,8 @@ class LegalRAGPipeline:
                     "total_time": round(total_time, 3),
                     "chunks_retrieved": len(retrieved_chunks),
                     "prompt_tokens": prompt_tokens,
+                    "temperature": self.llm.temperature,
+                    "do_sample": self.llm.do_sample,
                 },
             }
 

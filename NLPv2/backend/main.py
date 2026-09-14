@@ -134,6 +134,11 @@ def run_single_query(pipeline, query, debug=False):
             print(
                 f"   • Top retrieved chunk: {debug_info['retrieved_chunks'][0]['case'] if debug_info['retrieved_chunks'] else 'None'}"
             )
+        if "raw_response" in debug_info:
+            print(f"   • Raw response: {repr(debug_info['raw_response'])}")
+        if "prompt_preview" in debug_info:
+            print(f"   • Prompt preview: {debug_info['prompt_preview'][:300]}")
+        print(f"   • LLM config: temp={result.get('metrics', {}).get('temperature', '?')}, do_sample=True")
 
 
 def run_test_queries(pipeline, debug=False):
