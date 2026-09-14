@@ -46,3 +46,16 @@ CREATE INDEX judgment_chunks_section_idx ON judgment_chunks(section);
 
 -- GIN index for BM25-style full-text search (hybrid retrieval, alongside pgvector)
 CREATE INDEX judgment_chunks_content_tsv_idx ON judgment_chunks USING GIN (content_tsv);
+
+-- Citation edges table for precedent network graph
+CREATE TABLE citation_edges (
+    edge_id SERIAL PRIMARY KEY,
+    source_judgment_id INTEGER NOT NULL REFERENCES judgments(id) ON DELETE CASCADE,
+    target_judgment_id INTEGER REFERENCES judgments(id) ON DELETE CASCADE,
+    cited_text TEXT NOT NULL,
+    relationship_type VARCHAR(50) DEFAULT 'cited',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_citation_edges_source ON citation_edges(source_judgment_id);
+CREATE INDEX idx_citation_edges_target ON citation_edges(target_judgment_id);

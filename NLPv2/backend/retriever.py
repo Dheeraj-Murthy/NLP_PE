@@ -18,9 +18,14 @@ def _default_db_connection_string() -> str:
 
 
 class LegalRetriever:
-    def __init__(self, db_connection_string: Optional[str] = None):
+    def __init__(
+        self,
+        db_connection_string: Optional[str] = None,
+        graph_manager: Optional[Any] = None,
+    ):
         self.db_connection_string = db_connection_string or _default_db_connection_string()
         self.embedding_model = None
+        self.graph_manager = graph_manager
         self._load_embedding_model()
 
     def _load_embedding_model(self):
@@ -269,10 +274,12 @@ class LegalRetriever:
         candidate_k: int = 30,
         similarity_threshold: float = 0.2,
         rrf_k: int = 60,
+        graph_boost: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """Stage-1 retrieval: fuse dense (pgvector cosine) and BM25 (full-text)
         candidates via Reciprocal Rank Fusion, so exact-term queries aren't
         lost to pure embedding similarity and vice versa.
+        Optional graph_boost > 0 reweights RRF scores using PageRank centrality.
         """
         dense_chunks = self.retrieve_candidate_chunks(
             query, candidate_k=candidate_k, similarity_threshold=similarity_threshold
@@ -296,10 +303,19 @@ class LegalRetriever:
                 fused[cid].setdefault("bm25_score", chunk["bm25_score"])
             rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (rrf_k + rank + 1)
 
+        centrality_map = {}
+        if graph_boost > 0.0 and self.graph_manager:
+            centrality_map = self.graph_manager.get_centrality_scores()
+
         for cid, score in rrf_scores.items():
-            fused[cid]["rrf_score"] = score
+            j_id = fused[cid].get("judgment_id")
+            c_score = centrality_map.get(j_id, 0.0) if j_id else 0.0
+            final_rrf = score * (1.0 + graph_boost * c_score)
+
+            fused[cid]["rrf_score"] = final_rrf
             fused[cid].setdefault("similarity", 0.0)
             fused[cid].setdefault("bm25_score", 0.0)
+            fused[cid]["graph_centrality"] = c_score
 
         ranked = sorted(fused.values(), key=lambda c: c["rrf_score"], reverse=True)
         return ranked[:candidate_k]

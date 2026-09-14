@@ -72,6 +72,19 @@ CREATE INDEX IF NOT EXISTS judgment_chunks_section_idx ON judgment_chunks(sectio
 -- GIN index for BM25-style full-text search (hybrid retrieval, alongside pgvector)
 CREATE INDEX IF NOT EXISTS judgment_chunks_content_tsv_idx ON judgment_chunks USING GIN (content_tsv);
 
+-- Citation edges table for precedent network graph
+CREATE TABLE IF NOT EXISTS citation_edges (
+    edge_id SERIAL PRIMARY KEY,
+    source_judgment_id INTEGER NOT NULL REFERENCES judgments(id) ON DELETE CASCADE,
+    target_judgment_id INTEGER REFERENCES judgments(id) ON DELETE CASCADE,
+    cited_text TEXT NOT NULL,
+    relationship_type VARCHAR(50) DEFAULT 'cited',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_citation_edges_source ON citation_edges(source_judgment_id);
+CREATE INDEX IF NOT EXISTS idx_citation_edges_target ON citation_edges(target_judgment_id);
+
 -- Show created tables
 \dt
 SELECT 'Database initialized successfully!' as status;
