@@ -11,6 +11,12 @@ import networkx as nx
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 
 class CitationGraphManager:
     """Manages the in-memory NetworkX citation graph synchronized with PostgreSQL."""
