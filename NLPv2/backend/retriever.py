@@ -229,7 +229,7 @@ class LegalRetriever:
             # BM25 leg
             cur.execute(
                 """
-                SELECT se.section_id, ss.statute_id, st.title, st.short_title,
+                SELECT ss.section_id, ss.statute_id, st.title, st.short_title,
                        ss.section_number, ss.heading, ss.content,
                        ts_rank(ss.content_tsv, plainto_tsquery('english', %s)) as bm25_score
                 FROM statute_sections ss
