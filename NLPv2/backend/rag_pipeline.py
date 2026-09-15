@@ -9,6 +9,7 @@ from llm_inference import QwenInference
 from post_processor import PostProcessor, RAGResponse
 from reranker import CrossEncoderReranker
 from document_processor import DocumentProcessor
+from citation_graph import CitationGraphManager
 
 
 @dataclass
@@ -88,8 +89,12 @@ class LegalRAGPipeline:
         similarity_threshold: float = 0.3,
         max_context_length: int = 4000,
         max_new_tokens: int = 512,
+        graph_boost: float = 0.0,
     ):
-        self.retriever = LegalRetriever(db_connection_string)
+        self.graph_manager = CitationGraphManager()
+        self.retriever = LegalRetriever(
+            db_connection_string, graph_manager=self.graph_manager
+        )
         self.reranker = CrossEncoderReranker()
 
         self.stage1_k = 30
@@ -113,6 +118,7 @@ class LegalRAGPipeline:
         self.chat_session = ChatSession(max_history=10)
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
+        self.graph_boost = graph_boost
 
     def query(
         self, user_query: str, include_debug_info: bool = False
@@ -135,6 +141,7 @@ class LegalRAGPipeline:
                 query=user_query,
                 candidate_k=self.stage1_k,
                 similarity_threshold=self.stage1_threshold,
+                graph_boost=self.graph_boost,
             )
 
             # ✅ STAGE 2: reranking
@@ -168,6 +175,8 @@ class LegalRAGPipeline:
                 raw_response, retrieved_chunks, user_query
             )
 
+            precedent_chains = self._build_precedent_chains(retrieved_chunks)
+
             total_time = time.time() - start_time
 
             result = {
@@ -176,6 +185,7 @@ class LegalRAGPipeline:
                 "confidence": processed.confidence_score,
                 "citations": processed.citations,
                 "sources": processed.sources,
+                "precedent_chains": precedent_chains,
                 "metrics": {
                     "retrieval_time": round(retrieval_time, 3),
                     "generation_time": round(generation_time, 3),
@@ -184,6 +194,7 @@ class LegalRAGPipeline:
                     "prompt_tokens": prompt_tokens,
                     "temperature": self.llm.temperature,
                     "do_sample": self.llm.do_sample,
+                    "graph_boost": self.graph_boost,
                 },
             }
 
@@ -208,6 +219,29 @@ class LegalRAGPipeline:
                 "answer_found": False,
                 "confidence": 0.0,
             }
+
+    def _build_precedent_chains(
+        self, retrieved_chunks: List[Dict[str, Any]], max_cases: int = 5
+    ) -> List[Dict[str, Any]]:
+        """Build a per-case precedent-chain summary from the citation graph,
+        keyed by the cases backing the retrieved chunks."""
+        chains = []
+        seen_ids = set()
+
+        for chunk in retrieved_chunks:
+            judgment_id = chunk.get("judgment_id")
+            if not judgment_id or judgment_id in seen_ids:
+                continue
+            seen_ids.add(judgment_id)
+
+            summary = self.graph_manager.get_precedent_summary(judgment_id, top_n=2)
+            if summary:
+                chains.append(summary)
+
+            if len(chains) >= max_cases:
+                break
+
+        return chains
 
     def _create_no_results_response(
         self, user_query: str, include_debug_info: bool, retrieval_time: float

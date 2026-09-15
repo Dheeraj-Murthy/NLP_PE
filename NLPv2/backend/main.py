@@ -51,6 +51,12 @@ def main():
     parser.add_argument(
         "--debug", action="store_true", help="Include debug information"
     )
+    parser.add_argument(
+        "--graph-boost",
+        type=float,
+        default=0.0,
+        help="Boost retrieval score of high-precedence cases via citation graph PageRank (default: 0.0 = off)",
+    )
 
     args = parser.parse_args()
 
@@ -73,6 +79,7 @@ def main():
             top_k=args.top_k,
             similarity_threshold=args.threshold,
             load_llm=not args.retrieval_test,
+            graph_boost=args.graph_boost,
         )
 
         if args.clear_history:
@@ -123,6 +130,18 @@ def run_single_query(pipeline, query, debug=False):
         print(f"\n📚 Citations:")
         for citation in result["citations"]:
             print(f"   • {citation}")
+
+    if result.get("precedent_chains"):
+        print(f"\n🕸️  Precedent chains (from citation graph):")
+        for chain in result["precedent_chains"]:
+            print(f"   • {chain['label']}")
+            print(
+                f"      cites {chain['cites_count']} cases, cited by {chain['cited_by_count']} later judgments"
+            )
+            for c in chain["cites"][:2]:
+                print(f"        → cites: {c['label']} ({c['relationship']})")
+            for c in chain["cited_by"][:2]:
+                print(f"        ← cited by: {c['label']} ({c['relationship']})")
 
     if debug:
         print(f"\n🐛 Debug Info:")

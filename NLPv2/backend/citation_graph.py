@@ -187,3 +187,59 @@ class CitationGraphManager:
         if self.graph.number_of_nodes() == 0 or self.graph.number_of_edges() == 0:
             return {}
         return nx.pagerank(self.graph)
+
+    def get_precedent_summary(
+        self, judgment_id: int, top_n: int = 3
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Compact precedent-chain summary for a judgment: how many cases it cites,
+        how many cases cite it, and the strongest precedents followed/applied
+        later. Returns None if the judgment is not in the graph.
+        """
+        self.load_graph_from_db()
+        if judgment_id not in self.graph:
+            return None
+
+        out_citations = []
+        in_citations = []
+
+        for _src, tgt, data in self.graph.out_edges(judgment_id, data=True):
+            out_citations.append(
+                {
+                    "judgment_id": tgt,
+                    "label": self.graph.nodes[tgt].get("label", f"Case #{tgt}"),
+                    "relationship": data.get("relationship", "cited"),
+                }
+            )
+
+        for src, _tgt, data in self.graph.in_edges(judgment_id, data=True):
+            in_citations.append(
+                {
+                    "judgment_id": src,
+                    "label": self.graph.nodes[src].get("label", f"Case #{src}"),
+                    "relationship": data.get("relationship", "cited"),
+                }
+            )
+
+        rel_rank = {
+            "overruled": 0,
+            "followed": 1,
+            "distinguished": 2,
+            "referred": 3,
+            "cited": 4,
+        }
+        in_citations.sort(
+            key=lambda c: (rel_rank.get(c["relationship"], 5), c["judgment_id"])
+        )
+        out_citations.sort(
+            key=lambda c: (rel_rank.get(c["relationship"], 5), c["judgment_id"])
+        )
+
+        return {
+            "judgment_id": judgment_id,
+            "label": self.graph.nodes[judgment_id].get("label", f"Case #{judgment_id}"),
+            "cites_count": len(out_citations),
+            "cited_by_count": len(in_citations),
+            "cites": out_citations[:top_n],
+            "cited_by": in_citations[:top_n],
+        }
