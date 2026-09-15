@@ -3,15 +3,17 @@ from typing import List, Dict, Any
 class PromptBuilder:
     
     SYSTEM_PROMPT = (
-        "You are an Indian legal research assistant specializing in case law. "
-        "Answer the question using the provided context. Each context item is "
-        "numbered like [1], [2], etc. — cite the item number in brackets, e.g. "
-        "[1], immediately after any claim you draw from it. Synthesize across "
-        "items as needed. Only if the context is genuinely irrelevant to the "
-        "question, respond with exactly: \"Not found in the provided cases.\""
+        "You are an Indian legal research assistant specializing in case law "
+        "and statutes. Answer the question using the provided context. Each "
+        "context item is numbered like [1], [2], etc. — cite the item number "
+        "in brackets, e.g. [1], immediately after any claim you draw from it. "
+        "Context items may be case law paragraphs or statutory provisions "
+        "(Constitution articles, BNS sections). Synthesize across items as "
+        "needed. Only if the context is genuinely irrelevant to the question, "
+        "respond with exactly: \"Not found in the provided cases or statutes.\""
     )
     
-    NO_ANSWER_RESPONSE = "Not found in the provided cases."
+    NO_ANSWER_RESPONSE = "Not found in the provided cases or statutes."
     
     def __init__(self, max_context_length: int = 4000):
         self.max_context_length = max_context_length
@@ -61,13 +63,18 @@ Question:
         return prompt
     
     def _format_chunk_with_metadata(self, chunk: Dict[str, Any], chunk_number: int) -> str:
-        citation = f"{chunk['case']} ({chunk['court']}, {chunk['year']}, {chunk['para']})"
-        
+        doc_type = chunk.get("doc_type", "judgment")
+        if doc_type == "statute":
+            sec_num = chunk.get("section_number") or chunk.get("para", "")
+            citation = f"{chunk['case']} {sec_num}"
+        else:
+            citation = f"{chunk['case']} ({chunk['court']}, {chunk['year']}, {chunk['para']})"
+
         return f"""[{chunk_number}] {chunk['text']}
 
 Source: {citation}
-Section: {chunk['section']}"""
-    
+Type: {doc_type}"""
+
     def build_simple_prompt(self, retrieved_chunks: List[Dict[str, Any]], user_query: str) -> str:
         context_texts = []
         current_length = 0
@@ -101,14 +108,23 @@ Answer:"""
     def get_citation_list(self, retrieved_chunks: List[Dict[str, Any]]) -> List[str]:
         citations = []
         seen_cases = set()
-        
+
         for chunk in retrieved_chunks:
-            case_key = f"{chunk['case']} ({chunk['year']})"
+            doc_type = chunk.get("doc_type", "judgment")
+            sec_num = chunk.get("section_number") or chunk.get("para", "")
+            if doc_type == "statute":
+                case_key = f"{chunk['case']} {sec_num}"
+            else:
+                case_key = f"{chunk['case']} ({chunk['year']})"
+
             if case_key not in seen_cases:
-                citation = f"{chunk['case']} ({chunk['court']}, {chunk['year']}, {chunk['para']})"
+                if doc_type == "statute":
+                    citation = f"{chunk['case']} {sec_num}"
+                else:
+                    citation = f"{chunk['case']} ({chunk['court']}, {chunk['year']}, {chunk['para']})"
                 citations.append(citation)
                 seen_cases.add(case_key)
-        
+
         return citations
     
     def estimate_tokens(self, text: str) -> int:

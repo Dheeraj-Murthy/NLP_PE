@@ -104,6 +104,7 @@ class LegalRetriever:
 
                 retrieved_chunks.append(
                     {
+                        "doc_type": "judgment",
                         "chunk_id": chunk_id,
                         "text": content.strip(),
                         "case": case_name,
@@ -181,6 +182,7 @@ class LegalRetriever:
 
                 retrieved_chunks.append(
                     {
+                        "doc_type": "judgment",
                         "chunk_id": chunk_id,
                         "text": content.strip(),
                         "case": case_name,
@@ -193,6 +195,101 @@ class LegalRetriever:
                 )
 
             return retrieved_chunks
+
+        finally:
+            cur.close()
+            conn.close()
+
+    def retrieve_statute_candidates(
+        self, query: str, candidate_k: int = 15
+    ) -> List[Dict[str, Any]]:
+        """Retrieve statute sections: dense + bm25 over statute tables, fused with RRF."""
+        query_embedding = self.get_query_embedding(query)
+        conn = psycopg2.connect(self.db_connection_string)
+        cur = conn.cursor()
+
+        try:
+            # Dense leg
+            cur.execute(
+                """
+                SELECT se.section_id, ss.statute_id, st.title, st.short_title,
+                       ss.section_number, ss.heading, ss.content,
+                       1 - (se.embedding <=> %s::vector) as similarity
+                FROM statute_embeddings se
+                JOIN statute_sections ss ON ss.section_id = se.section_id
+                JOIN statutes st ON st.id = ss.statute_id
+                WHERE 1 - (se.embedding <=> %s::vector) >= 0.2
+                ORDER BY se.embedding <=> %s::vector
+                LIMIT %s
+                """,
+                (query_embedding, query_embedding, query_embedding, candidate_k),
+            )
+            dense = cur.fetchall()
+
+            # BM25 leg
+            cur.execute(
+                """
+                SELECT se.section_id, ss.statute_id, st.title, st.short_title,
+                       ss.section_number, ss.heading, ss.content,
+                       ts_rank(ss.content_tsv, plainto_tsquery('english', %s)) as bm25_score
+                FROM statute_sections ss
+                JOIN statutes st ON st.id = ss.statute_id
+                WHERE ss.content_tsv @@ plainto_tsquery('english', %s)
+                ORDER BY bm25_score DESC
+                LIMIT %s
+                """,
+                (query, query, candidate_k),
+            )
+            bm25 = cur.fetchall()
+
+            rrf_k = 60
+            fused: Dict[str, Dict[str, Any]] = {}
+            scores: Dict[str, float] = {}
+
+            for rank, row in enumerate(dense):
+                sid, statute_id, title, short, sec_num, heading, content, sim = row
+                key = f"s_{sid}"
+                fused[key] = {
+                    "doc_type": "statute",
+                    "chunk_id": sid,
+                    "text": content.strip(),
+                    "case": title,
+                    "court": "Statute",
+                    "year": None,
+                    "para": f"\u00a7{sec_num}",
+                    "section": "statute",
+                    "statute_name": title,
+                    "section_number": sec_num,
+                    "similarity": float(sim),
+                }
+                scores[key] = 1.0 / (rrf_k + rank + 1)
+
+            for rank, row in enumerate(bm25):
+                sid, statute_id, title, short, sec_num, heading, content, bm = row
+                key = f"s_{sid}"
+                if key not in fused:
+                    fused[key] = {
+                        "doc_type": "statute",
+                        "chunk_id": sid,
+                        "text": content.strip(),
+                        "case": title,
+                        "court": "Statute",
+                        "year": None,
+                        "para": f"\u00a7{sec_num}",
+                        "section": "statute",
+                        "statute_name": title,
+                        "section_number": sec_num,
+                        "similarity": 0.0,
+                    }
+                else:
+                    fused[key].setdefault("bm25_score", 0.0)
+                scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
+
+            for key, s in scores.items():
+                fused[key]["rrf_score"] = s
+
+            ranked = sorted(fused.values(), key=lambda c: c["rrf_score"], reverse=True)
+            return ranked[:candidate_k]
 
         finally:
             cur.close()
@@ -251,6 +348,7 @@ class LegalRetriever:
 
                 retrieved_chunks.append(
                     {
+                        "doc_type": "judgment",
                         "chunk_id": chunk_id,
                         "text": content.strip(),
                         "case": case_name,
@@ -276,46 +374,55 @@ class LegalRetriever:
         rrf_k: int = 60,
         graph_boost: float = 0.0,
     ) -> List[Dict[str, Any]]:
-        """Stage-1 retrieval: fuse dense (pgvector cosine) and BM25 (full-text)
-        candidates via Reciprocal Rank Fusion, so exact-term queries aren't
-        lost to pure embedding similarity and vice versa.
+        """Stage-1 retrieval: fuse dense (pgvector cosine), BM25 (full-text),
+        and statute candidates via Reciprocal Rank Fusion.
         Optional graph_boost > 0 reweights RRF scores using PageRank centrality.
         """
         dense_chunks = self.retrieve_candidate_chunks(
             query, candidate_k=candidate_k, similarity_threshold=similarity_threshold
         )
         bm25_chunks = self.retrieve_bm25_candidates(query, candidate_k=candidate_k)
+        statute_chunks = self.retrieve_statute_candidates(query, candidate_k=15)
 
-        fused: Dict[int, Dict[str, Any]] = {}
-        rrf_scores: Dict[int, float] = {}
+        # Use string keys to avoid collisions between judgment and statute IDs
+        fused: Dict[str, Dict[str, Any]] = {}
+        rrf_scores: Dict[str, float] = {}
 
         for rank, chunk in enumerate(dense_chunks):
-            cid = chunk["chunk_id"]
-            fused[cid] = chunk
-            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (rrf_k + rank + 1)
+            key = f"j_{chunk['chunk_id']}"
+            fused[key] = chunk
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
 
         for rank, chunk in enumerate(bm25_chunks):
-            cid = chunk["chunk_id"]
-            if cid not in fused:
+            key = f"j_{chunk['chunk_id']}"
+            if key not in fused:
                 chunk.setdefault("similarity", 0.0)
-                fused[cid] = chunk
+                fused[key] = chunk
             else:
-                fused[cid].setdefault("bm25_score", chunk["bm25_score"])
-            rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (rrf_k + rank + 1)
+                fused[key].setdefault("bm25_score", chunk["bm25_score"])
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
+
+        for rank, chunk in enumerate(statute_chunks):
+            key = f"s_{chunk['chunk_id']}"
+            if key not in fused:
+                fused[key] = chunk
+            else:
+                fused[key].setdefault("bm25_score", 0.0)
+            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
 
         centrality_map = {}
         if graph_boost > 0.0 and self.graph_manager:
             centrality_map = self.graph_manager.get_centrality_scores()
 
-        for cid, score in rrf_scores.items():
-            j_id = fused[cid].get("judgment_id")
+        for key, score in rrf_scores.items():
+            j_id = fused[key].get("judgment_id")
             c_score = centrality_map.get(j_id, 0.0) if j_id else 0.0
             final_rrf = score * (1.0 + graph_boost * c_score)
 
-            fused[cid]["rrf_score"] = final_rrf
-            fused[cid].setdefault("similarity", 0.0)
-            fused[cid].setdefault("bm25_score", 0.0)
-            fused[cid]["graph_centrality"] = c_score
+            fused[key]["rrf_score"] = final_rrf
+            fused[key].setdefault("similarity", 0.0)
+            fused[key].setdefault("bm25_score", 0.0)
+            fused[key]["graph_centrality"] = c_score
 
         ranked = sorted(fused.values(), key=lambda c: c["rrf_score"], reverse=True)
         return ranked[:candidate_k]

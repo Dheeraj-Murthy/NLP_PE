@@ -16,6 +16,7 @@ class PostProcessor:
 
     NO_ANSWER_PHRASES = [
             "Not found in the provided cases",
+            "Not found in the provided cases or statutes",
             "Not found in provided cases", 
             "Answer not found",
             "Information not found",
@@ -126,6 +127,24 @@ class PostProcessor:
 
         return confidence
 
+    def _format_citation(self, chunk: Dict[str, Any]) -> str:
+        doc_type = chunk.get("doc_type", "judgment")
+        if doc_type == "statute":
+            return f"{chunk['case']} {chunk.get('section_number') or chunk.get('para', '')}"
+        return f"{chunk['case']} ({chunk['court']}, {chunk['year']}, {chunk['para']})"
+
+    def _format_source(self, chunk: Dict[str, Any]) -> str:
+        doc_type = chunk.get("doc_type", "judgment")
+        if doc_type == "statute":
+            return f"{chunk['case']} {chunk.get('section_number') or chunk.get('para', '')}"
+        return f"{chunk['case']} ({chunk['court']}, {chunk['year']})"
+
+    def _source_key(self, chunk: Dict[str, Any]) -> str:
+        doc_type = chunk.get("doc_type", "judgment")
+        if doc_type == "statute":
+            return f"{chunk['case']} {chunk.get('section_number') or chunk.get('para', '')}"
+        return f"{chunk['case']} ({chunk['year']})"
+
     def _extract_citations(
             self, 
             answer: str, 
@@ -139,7 +158,7 @@ class PostProcessor:
             idx = int(match) - 1
             if 0 <= idx < len(retrieved_chunks):
                 chunk = retrieved_chunks[idx]
-                citation = f"{chunk['case']} ({chunk['court']}, {chunk['year']}, {chunk['para']})"
+                citation = self._format_citation(chunk)
                 if citation not in citations:
                     citations.append(citation)
 
@@ -148,7 +167,7 @@ class PostProcessor:
         for match in para_matches:
             for chunk in retrieved_chunks:
                 if chunk['para'] == f"¶{match}":
-                    citation = f"{chunk['case']} ({chunk['court']}, {chunk['year']}, {chunk['para']})"
+                    citation = self._format_citation(chunk)
                     if citation not in citations:
                         citations.append(citation)
                     break
@@ -157,14 +176,13 @@ class PostProcessor:
 
     def _get_unique_sources(self, retrieved_chunks: List[Dict[str, Any]]) -> List[str]:
         sources = []
-        seen_cases = set()
+        seen = set()
 
         for chunk in retrieved_chunks:
-            case_key = f"{chunk['case']} ({chunk['year']})"
-            if case_key not in seen_cases:
-                source = f"{chunk['case']} ({chunk['court']}, {chunk['year']})"
-                sources.append(source)
-                seen_cases.add(case_key)
+            key = self._source_key(chunk)
+            if key not in seen:
+                sources.append(self._format_source(chunk))
+                seen.add(key)
 
         return sources
 
