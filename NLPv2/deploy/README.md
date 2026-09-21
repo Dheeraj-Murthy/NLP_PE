@@ -85,7 +85,7 @@ docker-compose down
 |---------|------|-------------|
 | postgres | 5432 | PostgreSQL with pgvector |
 | api | 8000 | FastAPI backend |
-| frontend | 3000 | Next.js UI |
+| frontend | 3000 | Streamlit UI |
 
 ### With GPU (for LLM)
 

@@ -1,19 +1,19 @@
 #!/bin/bash
-# Start Next.js frontend
+# Start Streamlit frontend
 # Usage: ./start_frontend.sh [port]
 
 set -e
 
-PORT="${1:-3000}"
-API_URL="${API_URL:-http://localhost:8000}"
+PORT="${1:-8501}"
+API_URL="${RAG_API_URL:-http://localhost:8000}"
 
 echo "Starting frontend on port $PORT"
 echo "API URL: $API_URL"
 
 cd "$(dirname "$0")/../.."
 
-cd frontend/nextjs
+cd frontend/streamlit
 
-export NEXT_PUBLIC_API_URL="$API_URL"
+export RAG_API_URL="$API_URL"
 
-npm run dev -- -p "$PORT"
+streamlit run app.py --server.port "$PORT" --server.address 0.0.0.0

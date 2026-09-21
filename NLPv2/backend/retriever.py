@@ -134,7 +134,7 @@ class LegalRetriever:
         try:
             cur.execute(
                 """
-                SELECT 
+                SELECT
                     jc.content,
                     j.petitioner,
                     j.respondent,
@@ -142,6 +142,7 @@ class LegalRetriever:
                     EXTRACT(YEAR FROM j.date_of_judgment) as year,
                     jc.section,
                     jc.chunk_id,
+                    jc.judgment_id,
                     1 - (je.embedding <=> %s::vector) as similarity
                 FROM judgment_embeddings je
                 JOIN judgment_chunks jc ON jc.chunk_id = je.chunk_id
@@ -171,6 +172,7 @@ class LegalRetriever:
                     year,
                     section,
                     chunk_id,
+                    judgment_id,
                     similarity,
                 ) = row
 
@@ -184,6 +186,7 @@ class LegalRetriever:
                     {
                         "doc_type": "judgment",
                         "chunk_id": chunk_id,
+                        "judgment_id": judgment_id,
                         "text": content.strip(),
                         "case": case_name,
                         "court": court if court else "Unknown Court",
@@ -315,6 +318,7 @@ class LegalRetriever:
                     EXTRACT(YEAR FROM j.date_of_judgment) as year,
                     jc.section,
                     jc.chunk_id,
+                    jc.judgment_id,
                     ts_rank(jc.content_tsv, plainto_tsquery('english', %s)) as bm25_score
                 FROM judgment_chunks jc
                 JOIN judgments j ON j.id = jc.judgment_id
@@ -337,6 +341,7 @@ class LegalRetriever:
                     year,
                     section,
                     chunk_id,
+                    judgment_id,
                     bm25_score,
                 ) = row
 
@@ -350,6 +355,7 @@ class LegalRetriever:
                     {
                         "doc_type": "judgment",
                         "chunk_id": chunk_id,
+                        "judgment_id": judgment_id,
                         "text": content.strip(),
                         "case": case_name,
                         "court": court if court else "Unknown Court",

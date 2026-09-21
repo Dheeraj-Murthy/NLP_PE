@@ -625,8 +625,8 @@ class LegalRAGPipeline:
             start = time.time()
             chunks = self.retriever.retrieve_hybrid_candidates(
                 query=query,
-                candidate_k=self.top_k,
-                similarity_threshold=self.similarity_threshold,
+                candidate_k=self.stage1_k,
+                similarity_threshold=self.stage1_threshold,
             )
             stats = self.retriever.get_retrieval_stats(query)
             return {
