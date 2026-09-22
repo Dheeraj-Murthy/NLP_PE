@@ -1,7 +1,8 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Callable, Tuple
+
 
 class PromptBuilder:
-    
+
     SYSTEM_PROMPT = (
         "You are an Indian legal research assistant specializing in case law "
         "and statutes. Answer the question using the provided context. Each "
@@ -12,44 +13,121 @@ class PromptBuilder:
         "needed. Only if the context is genuinely irrelevant to the question, "
         "respond with exactly: \"Not found in the provided cases or statutes.\""
     )
-    
-    NO_ANSWER_RESPONSE = "Not found in the provided cases or statutes."
-    
-    def __init__(self, max_context_length: int = 4000):
-        self.max_context_length = max_context_length
-    
-    def build_rag_prompt(
-        self, 
-        retrieved_chunks: List[Dict[str, Any]], 
-        user_query: str
-    ) -> str:
-        context_parts = []
-        current_length = 0
-        min_useful_budget = 200
 
-        for i, chunk in enumerate(retrieved_chunks, 1):
-            remaining = self.max_context_length - current_length
-            if remaining <= min_useful_budget:
+    NO_ANSWER_RESPONSE = "Not found in the provided cases or statutes."
+
+    MIN_USEFUL_TOKENS = 40
+
+    def __init__(self, max_context_tokens: int = 1200):
+        self.max_context_tokens = max_context_tokens
+
+    def build_context_block(
+        self,
+        retrieved_chunks: List[Dict[str, Any]],
+        token_counter: Optional[Callable[[str], int]] = None,
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """Backend-agnostic context block. Chunks are grouped by case/statute
+        so the case metadata (name, court, year) or statute title is stated
+        once per group, with that group's excerpts nested under it, instead
+        of repeating the full citation on every chunk.
+
+        Numbering [1..N] stays the FLAT, original 1-based index into
+        `retrieved_chunks` even though chunks are visually grouped —
+        post_processor._extract_citations maps [N] back to
+        retrieved_chunks[N-1] by that exact positional index, so grouping
+        must never renumber.
+        """
+        counter = token_counter or self._fallback_token_estimate
+        budget = max_tokens if max_tokens is not None else self.max_context_tokens
+
+        groups = self._group_chunks(retrieved_chunks)
+        blocks: List[str] = []
+        used = 0
+
+        for _key, header, members in groups:
+            if budget - used <= self.MIN_USEFUL_TOKENS:
                 break
 
-            chunk_text = self._format_chunk_with_metadata(chunk, i)
+            group_lines = [header]
+            group_used = counter(header)
+            for idx, chunk in members:
+                remaining = budget - used - group_used
+                if remaining <= self.MIN_USEFUL_TOKENS:
+                    break
 
-            if len(chunk_text) > remaining:
-                # Truncate the chunk's own text (not the citation/section
-                # metadata) to fit what's left, rather than dropping a
-                # highly-ranked chunk in favor of a lower-ranked one that
-                # merely happens to be shorter.
-                overhead = len(chunk_text) - len(chunk["text"])
-                truncated = dict(chunk)
-                truncated["text"] = chunk["text"][: max(remaining - overhead, 0)] + "..."
-                chunk_text = self._format_chunk_with_metadata(truncated, i)
+                excerpt = f"  [{idx}] {chunk['text']}"
+                excerpt_tokens = counter(excerpt)
+                if excerpt_tokens > remaining:
+                    excerpt = self._truncate_to_tokens(excerpt, remaining, counter)
+                    if not excerpt.strip():
+                        break
+                    excerpt_tokens = counter(excerpt)
 
-            context_parts.append(chunk_text)
-            current_length += len(chunk_text)
+                group_lines.append(excerpt)
+                group_used += excerpt_tokens
 
-        context = "\n\n".join(context_parts)
-        
-        prompt = f"""<|im_start|>system
+            if len(group_lines) > 1:
+                blocks.append("\n".join(group_lines))
+                used += group_used
+
+        return "\n\n".join(blocks)
+
+    def _group_chunks(
+        self, retrieved_chunks: List[Dict[str, Any]]
+    ) -> List[Tuple[str, str, List[Tuple[int, Dict[str, Any]]]]]:
+        order: List[str] = []
+        groups: Dict[str, List[Tuple[int, Dict[str, Any]]]] = {}
+        headers: Dict[str, str] = {}
+
+        for i, chunk in enumerate(retrieved_chunks, 1):
+            key = self._group_key(chunk)
+            if key not in groups:
+                order.append(key)
+                groups[key] = []
+                headers[key] = self._group_header(chunk)
+            groups[key].append((i, chunk))
+
+        return [(k, headers[k], groups[k]) for k in order]
+
+    def _group_key(self, chunk: Dict[str, Any]) -> str:
+        if chunk.get("doc_type") == "statute":
+            # statute_id isn't present on the chunk payload (retriever.py
+            # drops it before returning the dict) — the statute title is
+            # unique per statute in practice, so key on that instead.
+            return f"statute:{chunk['case']}"
+        return f"judgment:{chunk.get('judgment_id') or chunk['case']}"
+
+    def _group_header(self, chunk: Dict[str, Any]) -> str:
+        if chunk.get("doc_type") == "statute":
+            return f"Statute: {chunk['case']}"
+        return f"Case: {chunk['case']} ({chunk['court']}, {chunk['year']})"
+
+    def _fallback_token_estimate(self, text: str) -> int:
+        return int(len(text.split()) * 1.3)
+
+    def _truncate_to_tokens(self, text: str, budget: int, counter: Callable[[str], int]) -> str:
+        if budget <= 0:
+            return ""
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if counter(text[:mid] + "...") <= budget:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo] + "..."
+
+    def build_rag_prompt(
+        self,
+        retrieved_chunks: List[Dict[str, Any]],
+        user_query: str,
+    ) -> str:
+        """Deprecated — Qwen-specific string builder, superseded by
+        build_context_block() + QwenBackend.generate(). Kept as a thin
+        wrapper for demo.py and direct callers."""
+        context = self.build_context_block(retrieved_chunks)
+        return f"""<|im_start|>system
 {self.SYSTEM_PROMPT}<|im_end|>
 <|im_start|>user
 Context:
@@ -59,52 +137,7 @@ Question:
 {user_query}<|im_end|>
 <|im_start|>assistant
 """
-        
-        return prompt
-    
-    def _format_chunk_with_metadata(self, chunk: Dict[str, Any], chunk_number: int) -> str:
-        doc_type = chunk.get("doc_type", "judgment")
-        if doc_type == "statute":
-            sec_num = chunk.get("section_number") or chunk.get("para", "")
-            citation = f"{chunk['case']} {sec_num}"
-        else:
-            citation = f"{chunk['case']} ({chunk['court']}, {chunk['year']}, {chunk['para']})"
 
-        return f"""[{chunk_number}] {chunk['text']}
-
-Source: {citation}
-Type: {doc_type}"""
-
-    def build_simple_prompt(self, retrieved_chunks: List[Dict[str, Any]], user_query: str) -> str:
-        context_texts = []
-        current_length = 0
-        min_useful_budget = 200
-
-        for chunk in retrieved_chunks:
-            remaining = self.max_context_length - current_length
-            if remaining <= min_useful_budget:
-                break
-
-            text = chunk['text']
-            if len(text) > remaining:
-                text = text[:remaining] + "..."
-
-            context_texts.append(text)
-            current_length += len(text)
-
-        context = "\n\n".join(context_texts)
-        
-        prompt = f"""Answer the following legal question using ONLY the provided context. If the answer is not found in the context, say "{self.NO_ANSWER_RESPONSE}".
-
-Context:
-{context}
-
-Question: {user_query}
-
-Answer:"""
-        
-        return prompt
-    
     def get_citation_list(self, retrieved_chunks: List[Dict[str, Any]]) -> List[str]:
         citations = []
         seen_cases = set()
@@ -126,49 +159,60 @@ Answer:"""
                 seen_cases.add(case_key)
 
         return citations
-    
-    def estimate_tokens(self, text: str) -> int:
-        return int(len(text.split()) * 1.3)
-    
-    def is_context_too_long(self, prompt: str, max_tokens: int = 3000) -> bool:
-        estimated_tokens = self.estimate_tokens(prompt)
-        return estimated_tokens > max_tokens
+
 
 if __name__ == "__main__":
     builder = PromptBuilder()
-    
+
     sample_chunks = [
         {
+            "doc_type": "judgment",
+            "chunk_id": 1,
+            "judgment_id": 101,
             "text": "The Supreme Court held that educational institutions must follow due process when implementing fee structures.",
             "case": "ABC University v. State",
-            "court": "Supreme Court of India", 
+            "court": "Supreme Court of India",
             "year": 2019,
             "para": "¶23",
             "section": "judgment",
-            "similarity": 0.89
+            "similarity": 0.89,
         },
         {
+            "doc_type": "judgment",
+            "chunk_id": 2,
+            "judgment_id": 101,
+            "text": "The Court further clarified that fee revisions must be published in advance.",
+            "case": "ABC University v. State",
+            "court": "Supreme Court of India",
+            "year": 2019,
+            "para": "¶24",
+            "section": "judgment",
+            "similarity": 0.87,
+        },
+        {
+            "doc_type": "judgment",
+            "chunk_id": 3,
+            "judgment_id": 202,
             "text": "The Karnataka Education Bill was challenged on constitutional grounds for violating fundamental rights.",
             "case": "Karnataka Students Association v. State",
             "court": "Karnataka High Court",
-            "year": 2021, 
+            "year": 2021,
             "para": "¶11",
             "section": "facts",
-            "similarity": 0.85
-        }
+            "similarity": 0.85,
+        },
     ]
-    
+
     query = "What did the Supreme Court say about educational fees in Karnataka?"
-    
-    prompt = builder.build_rag_prompt(sample_chunks, query)
-    print("Generated RAG Prompt:")
+
+    context = builder.build_context_block(sample_chunks)
+    print("Generated context block:")
     print("=" * 50)
-    print(prompt)
-    
+    print(context)
+
     print("\n" + "=" * 50)
     print("Citations:")
     for citation in builder.get_citation_list(sample_chunks):
         print(f"- {citation}")
-    
-    print(f"\nEstimated tokens: {builder.estimate_tokens(prompt):.0f}")
-    print(f"Context too long: {builder.is_context_too_long(prompt)}")
+
+    print(f"\nEstimated tokens: {builder._fallback_token_estimate(context):.0f}")

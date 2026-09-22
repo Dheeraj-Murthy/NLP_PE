@@ -1,8 +1,8 @@
 from rag_pipeline import LegalRAGPipeline, ChatSession, ChatMessage
-from retriever import LegalRetriever
-from reranker import CrossEncoderReranker
+from retrieval.retriever import LegalRetriever
+from retrieval.reranker import CrossEncoderReranker
 from prompt_builder import PromptBuilder
-from llm_inference import QwenInference
+from llm.qwen_inference import QwenInference
 from post_processor import PostProcessor, RAGResponse
 from document_processor import DocumentProcessor
 

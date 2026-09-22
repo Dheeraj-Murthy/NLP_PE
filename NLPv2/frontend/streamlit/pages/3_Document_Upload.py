@@ -6,6 +6,7 @@ from lib.ui_helpers import (
     render_api_error,
     render_citations,
     render_metrics,
+    render_model_selector,
     render_sources,
 )
 
@@ -20,26 +21,34 @@ with st.container(horizontal=True):
     include_retrieval = st.toggle("Cross-reference case law", value=True)
     include_debug = st.toggle("Include debug info", value=False)
 
+model, external_ok, api_key = render_model_selector("document")
+
 if st.button(
     "Analyze document",
     icon=":material/play_arrow:",
     type="primary",
     disabled=uploaded_file is None,
 ):
-    with st.spinner("Uploading and processing (OCR + generation can take several minutes)..."):
-        try:
-            data = api_client.upload_document(
-                file_bytes=uploaded_file.getvalue(),
-                filename=uploaded_file.name,
-                content_type=uploaded_file.type or "application/octet-stream",
-                query_text=query_text or None,
-                include_retrieval=include_retrieval,
-                include_debug=include_debug,
-            )
-            st.session_state.last_document_result = data
-        except Exception as e:
-            render_api_error(e)
-            st.session_state.last_document_result = None
+    if model and not external_ok:
+        st.warning("Tick the external-model confirmation checkbox first.", icon=":material/lock:")
+    else:
+        with st.spinner("Uploading and processing (OCR + generation can take several minutes)..."):
+            try:
+                data = api_client.upload_document(
+                    file_bytes=uploaded_file.getvalue(),
+                    filename=uploaded_file.name,
+                    content_type=uploaded_file.type or "application/octet-stream",
+                    query_text=query_text or None,
+                    include_retrieval=include_retrieval,
+                    include_debug=include_debug,
+                    model=model,
+                    external_ok=external_ok,
+                    api_key=api_key,
+                )
+                st.session_state.last_document_result = data
+            except Exception as e:
+                render_api_error(e)
+                st.session_state.last_document_result = None
 
 result = st.session_state.get("last_document_result")
 if result:

@@ -6,12 +6,14 @@ import sys
 import os
 import networkx as nx
 
-# Add current directory and ingestion directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ingestion"))
+# Add backend/ (parent of this tests/ dir, for the retrieval package) and
+# ingestion/ (sibling of backend/) to path.
+_backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _backend_dir)
+sys.path.insert(0, os.path.join(_backend_dir, "..", "ingestion"))
 
 from citation_extractor import CitationExtractor
-from citation_graph import CitationGraphManager
+from retrieval.citation_graph import CitationGraphManager
 
 
 def test_citation_extractor():

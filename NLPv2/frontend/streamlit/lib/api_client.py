@@ -63,30 +63,42 @@ def query(
     top_k: int = 8,
     threshold: float = 0.3,
     include_debug: bool = False,
+    model: Optional[str] = None,
+    external_ok: bool = False,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
+    data = {
+        "query": query_text,
+        "top_k": top_k,
+        "threshold": threshold,
+        "include_debug": include_debug,
+        "external_ok": external_ok,
+    }
+    if model:
+        data["model"] = model
+    if api_key:
+        data["api_key"] = api_key
     try:
-        resp = requests.post(
-            _url("/query"),
-            data={
-                "query": query_text,
-                "top_k": top_k,
-                "threshold": threshold,
-                "include_debug": include_debug,
-            },
-            timeout=DEFAULT_TIMEOUT,
-        )
+        resp = requests.post(_url("/query"), data=data, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException as e:
         raise LegalRAGAPIError(str(e)) from e
     return _handle_response(resp)["data"]
 
 
-def chat(message: str, include_debug: bool = False) -> Dict[str, Any]:
+def chat(
+    message: str,
+    include_debug: bool = False,
+    model: Optional[str] = None,
+    external_ok: bool = False,
+    api_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    data = {"message": message, "include_debug": include_debug, "external_ok": external_ok}
+    if model:
+        data["model"] = model
+    if api_key:
+        data["api_key"] = api_key
     try:
-        resp = requests.post(
-            _url("/chat"),
-            data={"message": message, "include_debug": include_debug},
-            timeout=DEFAULT_TIMEOUT,
-        )
+        resp = requests.post(_url("/chat"), data=data, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException as e:
         raise LegalRAGAPIError(str(e)) from e
     return _handle_response(resp)["data"]
@@ -115,16 +127,25 @@ def upload_document(
     query_text: Optional[str] = None,
     include_retrieval: bool = True,
     include_debug: bool = False,
+    model: Optional[str] = None,
+    external_ok: bool = False,
+    api_key: Optional[str] = None,
 ) -> Dict[str, Any]:
+    data = {
+        "query": query_text or "",
+        "include_retrieval": include_retrieval,
+        "include_debug": include_debug,
+        "external_ok": external_ok,
+    }
+    if model:
+        data["model"] = model
+    if api_key:
+        data["api_key"] = api_key
     try:
         resp = requests.post(
             _url("/document"),
             files={"file": (filename, file_bytes, content_type)},
-            data={
-                "query": query_text or "",
-                "include_retrieval": include_retrieval,
-                "include_debug": include_debug,
-            },
+            data=data,
             timeout=DOCUMENT_TIMEOUT,
         )
     except requests.RequestException as e:

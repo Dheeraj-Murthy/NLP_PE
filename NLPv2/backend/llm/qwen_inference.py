@@ -51,24 +51,40 @@ class QwenInference:
             raise RuntimeError(f"Failed to load model {self.model_name}: {e}")
     
     def generate_response(
-        self, 
-        prompt: str, 
+        self,
+        prompt: str,
         max_new_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         do_sample: Optional[bool] = None
     ) -> str:
+        return self.generate_response_with_stats(
+            prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            do_sample=do_sample,
+        )["text"]
+
+    def generate_response_with_stats(
+        self,
+        prompt: str,
+        max_new_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        do_sample: Optional[bool] = None
+    ) -> Dict[str, Any]:
         if not self.model or not self.tokenizer:
             raise RuntimeError("Model not loaded")
-        
+
         max_new_tokens = max_new_tokens if max_new_tokens is not None else self.max_new_tokens
         temperature = temperature if temperature is not None else self.temperature
         top_p = top_p if top_p is not None else self.top_p
         do_sample = do_sample if do_sample is not None else self.do_sample
-        
+
         try:
             inputs = self.tokenizer.encode(prompt, return_tensors="pt").to(self.model.device)
-            
+
             with torch.no_grad():
                 outputs = self.model.generate(
                     inputs,
@@ -80,12 +96,16 @@ class QwenInference:
                     eos_token_id=self.tokenizer.eos_token_id,
                     return_dict_in_generate=True
                 )
-            
+
             generated_tokens = outputs.sequences[0][len(inputs[0]):]
             response = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
-            
-            return response.strip()
-            
+
+            return {
+                "text": response.strip(),
+                "prompt_tokens": len(inputs[0]),
+                "completion_tokens": len(generated_tokens),
+            }
+
         except Exception as e:
             raise RuntimeError(f"Generation failed: {e}")
         finally:

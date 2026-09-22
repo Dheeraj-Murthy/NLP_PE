@@ -6,6 +6,7 @@ from lib.ui_helpers import (
     render_api_error,
     render_citations,
     render_metrics,
+    render_model_selector,
     render_precedent_chains,
     render_sources,
 )
@@ -21,16 +22,24 @@ with st.form("single_query_form"):
         top_k = st.slider("top_k", min_value=1, max_value=20, value=8)
         threshold = st.slider("Similarity threshold", min_value=0.0, max_value=1.0, value=0.3, step=0.05)
         include_debug = st.toggle("Include debug info", value=False)
+    model, external_ok, api_key = render_model_selector("single_query")
     submitted = st.form_submit_button("Run query", icon=":material/play_arrow:", type="primary")
 
 if submitted and query_text.strip():
-    with st.spinner("Retrieving and generating..."):
-        try:
-            data = api_client.query(query_text, top_k=top_k, threshold=threshold, include_debug=include_debug)
-            st.session_state.last_query_result = data
-        except Exception as e:
-            render_api_error(e)
-            st.session_state.last_query_result = None
+    if model and not external_ok:
+        st.warning("Tick the external-model confirmation checkbox first.", icon=":material/lock:")
+        st.session_state.last_query_result = None
+    else:
+        with st.spinner("Retrieving and generating..."):
+            try:
+                data = api_client.query(
+                    query_text, top_k=top_k, threshold=threshold, include_debug=include_debug,
+                    model=model, external_ok=external_ok, api_key=api_key,
+                )
+                st.session_state.last_query_result = data
+            except Exception as e:
+                render_api_error(e)
+                st.session_state.last_query_result = None
 
 result = st.session_state.get("last_query_result")
 if result:

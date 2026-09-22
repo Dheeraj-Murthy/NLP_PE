@@ -3,13 +3,16 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from retriever import LegalRetriever
+from retrieval.retriever import LegalRetriever
 from prompt_builder import PromptBuilder
-from llm_inference import QwenInference
+from llm.base import LLMBackend, GenerationResult, PrivacyGateError
+from llm.qwen_backend import QwenBackend
 from post_processor import PostProcessor, RAGResponse
-from reranker import CrossEncoderReranker
+from retrieval.reranker import CrossEncoderReranker
 from document_processor import DocumentProcessor
-from citation_graph import CitationGraphManager
+from retrieval.citation_graph import CitationGraphManager
+
+DEFAULT_QWEN_MODEL = "Qwen/Qwen2.5-7B-Instruct-1M"
 
 
 @dataclass
@@ -66,28 +69,26 @@ class ChatSession:
             history.append(item)
         return history[-self.max_history :]
 
-    def get_conversation_context(self) -> str:
-        context_parts = []
-        for msg in self.messages[-self.max_history :]:
-            if msg.role == "user":
-                context_parts.append(f"User: {msg.content}")
-            else:
-                context_parts.append(f"Assistant: {msg.content[:200]}...")
-        return "\n".join(context_parts)
-
     def clear(self):
         self.messages.clear()
 
 
 class LegalRAGPipeline:
+    DOCUMENT_SYSTEM_PROMPT = (
+        PromptBuilder.SYSTEM_PROMPT
+        + " When analyzing an attached document, if it contains court judgments or "
+        "legal cases, identify the parties involved, the key issues addressed, the "
+        "court's reasoning and holding, and any cited precedents."
+    )
+
     def __init__(
         self,
         db_connection_string: Optional[str] = None,
-        model_name: str = "Qwen/Qwen2.5-7B-Instruct-1M",
+        model_name: str = DEFAULT_QWEN_MODEL,
         load_llm: bool = True,
         top_k: int = 8,
         similarity_threshold: float = 0.3,
-        max_context_length: int = 4000,
+        max_context_tokens: int = 1200,
         max_new_tokens: int = 512,
         graph_boost: float = 0.0,
     ):
@@ -101,11 +102,13 @@ class LegalRAGPipeline:
         self.stage2_k = top_k
         self.stage1_threshold = 0.2
 
-        self.prompt_builder = PromptBuilder(max_context_length)
+        self.prompt_builder = PromptBuilder(max_context_tokens)
 
-        self.llm = None
+        self.default_model_id = model_name
+        self.max_new_tokens = max_new_tokens
+        self.backends: Dict[str, LLMBackend] = {}
         if load_llm:
-            self.llm = QwenInference(
+            self.backends["default"] = QwenBackend(
                 model_name=model_name,
                 max_new_tokens=max_new_tokens,
                 temperature=0.9,
@@ -120,14 +123,84 @@ class LegalRAGPipeline:
         self.similarity_threshold = similarity_threshold
         self.graph_boost = graph_boost
 
+    def _resolve_backend(
+        self, model: Optional[str], external_ok: bool, api_key: Optional[str] = None
+    ) -> LLMBackend:
+        if not model or model == self.default_model_id or model == "qwen":
+            if "default" not in self.backends:
+                raise RuntimeError("LLM not loaded")
+            return self.backends["default"]
+
+        if model.startswith("claude-"):
+            from llm.anthropic_backend import AnthropicBackend
+
+            backend_cls = AnthropicBackend
+        elif model.startswith("gpt-") or model.startswith("o1") or model.startswith("o3"):
+            from llm.openai_backend import OpenAIBackend
+
+            backend_cls = OpenAIBackend
+        else:
+            raise ValueError(f"Unknown model: {model}")
+
+        if backend_cls.requires_external_ok and not external_ok:
+            raise PrivacyGateError(
+                f"Model '{model}' is an external API backend. Pass external_ok=True "
+                f"to confirm you accept sending case text to this provider."
+            )
+
+        if api_key:
+            # A user-supplied key is per-request only — never cached on the
+            # shared pipeline instance, since `pipeline` is one global object
+            # serving every API request/user (api.py:31). Caching it in
+            # self.backends would leak one user's key to every other caller
+            # who later picks the same model without supplying their own.
+            return backend_cls(model_id=model, api_key=api_key)
+
+        if model in self.backends:
+            return self.backends[model]
+
+        backend = backend_cls(model_id=model)  # uses the server's own env-configured key
+        self.backends[model] = backend
+        return backend
+
+    def _build_metrics(
+        self,
+        gen: Optional[GenerationResult],
+        retrieval_time: float,
+        generation_time: float,
+        total_time: float,
+        chunks_retrieved: int,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        metrics = {
+            "retrieval_time": round(retrieval_time, 3),
+            "generation_time": round(generation_time, 3),
+            "total_time": round(total_time, 3),
+            "chunks_retrieved": chunks_retrieved,
+            "prompt_tokens": gen.prompt_tokens if gen else 0,
+            "completion_tokens": gen.completion_tokens if gen else 0,
+            "model_id": gen.model_id if gen else None,
+            "model_version": gen.model_version if gen else None,
+        }
+        if extra:
+            metrics.update(extra)
+        return metrics
+
     def query(
-        self, user_query: str, include_debug_info: bool = False
+        self,
+        user_query: str,
+        include_debug_info: bool = False,
+        model: Optional[str] = None,
+        external_ok: bool = False,
+        api_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         start_time = time.time()
 
-        if not self.llm:
+        try:
+            backend = self._resolve_backend(model, external_ok, api_key)
+        except (PrivacyGateError, RuntimeError, ValueError) as e:
             return {
-                "error": "LLM not loaded",
+                "error": str(e),
                 "answer": None,
                 "answer_found": False,
                 "confidence": 0.0,
@@ -156,28 +229,31 @@ class LegalRAGPipeline:
                     user_query, include_debug_info, retrieval_time
                 )
 
-            prompt = self.prompt_builder.build_rag_prompt(retrieved_chunks, user_query)
-
-            prompt_tokens = 0
-            if self.llm.tokenizer:
-                prompt_tokens = self.llm.tokenizer(
-                    prompt,
-                    truncation=True,
-                    max_length=self.prompt_builder.max_context_length,
-                    return_length=True,
-                )["length"][0]
+            context_block = self.prompt_builder.build_context_block(
+                retrieved_chunks, token_counter=backend.count_tokens
+            )
 
             generation_start = time.time()
-            raw_response = self.llm.generate_response(prompt)
+            gen = backend.generate(
+                context_block=context_block,
+                user_query=user_query,
+                system_prompt=self.prompt_builder.SYSTEM_PROMPT,
+                max_new_tokens=self.max_new_tokens,
+            )
             generation_time = time.time() - generation_start
 
             processed = self.post_processor.process_response(
-                raw_response, retrieved_chunks, user_query
+                gen.text, retrieved_chunks, user_query
             )
 
             precedent_chains = self._build_precedent_chains(retrieved_chunks)
 
             total_time = time.time() - start_time
+
+            extra: Dict[str, Any] = {"graph_boost": self.graph_boost}
+            if isinstance(backend, QwenBackend):
+                extra["temperature"] = backend.inference.temperature
+                extra["do_sample"] = backend.inference.do_sample
 
             result = {
                 "answer": self.post_processor.format_response_with_citations(processed),
@@ -186,25 +262,19 @@ class LegalRAGPipeline:
                 "citations": processed.citations,
                 "sources": processed.sources,
                 "precedent_chains": precedent_chains,
-                "metrics": {
-                    "retrieval_time": round(retrieval_time, 3),
-                    "generation_time": round(generation_time, 3),
-                    "total_time": round(total_time, 3),
-                    "chunks_retrieved": len(retrieved_chunks),
-                    "prompt_tokens": prompt_tokens,
-                    "temperature": self.llm.temperature,
-                    "do_sample": self.llm.do_sample,
-                    "graph_boost": self.graph_boost,
-                },
+                "metrics": self._build_metrics(
+                    gen, retrieval_time, generation_time, total_time,
+                    len(retrieved_chunks), extra=extra,
+                ),
             }
 
             if include_debug_info:
                 result["debug"] = {
                     "retrieved_chunks": retrieved_chunks[:3],
-                    "raw_response": raw_response,
-                    "prompt_preview": prompt[:500] + "..."
-                    if len(prompt) > 500
-                    else prompt,
+                    "raw_response": gen.text,
+                    "prompt_preview": context_block[:500] + "..."
+                    if len(context_block) > 500
+                    else context_block,
                     "quality_metrics": self.post_processor.get_quality_metrics(
                         processed
                     ),
@@ -252,13 +322,9 @@ class LegalRAGPipeline:
             "confidence": 0.0,
             "citations": [],
             "sources": [],
-            "metrics": {
-                "retrieval_time": round(retrieval_time, 3),
-                "generation_time": 0.0,
-                "total_time": round(retrieval_time, 3),
-                "chunks_retrieved": 0,
-                "prompt_tokens": 0,
-            },
+            "metrics": self._build_metrics(
+                None, retrieval_time, 0.0, retrieval_time, 0
+            ),
         }
 
         if include_debug_info:
@@ -279,21 +345,35 @@ class LegalRAGPipeline:
         return results
 
     def get_system_status(self) -> Dict[str, Any]:
-        memory_info = self.llm.get_memory_info() if self.llm else {}
+        default_backend = self.backends.get("default")
+        backends_status = {
+            key: {"model_id": backend.model_id, "loaded": True}
+            for key, backend in self.backends.items()
+        }
+        memory_info = (
+            default_backend.inference.get_memory_info()
+            if isinstance(default_backend, QwenBackend)
+            else {}
+        )
         return {
-            "model_loaded": self.llm.is_model_loaded() if self.llm else False,
-            "model_name": self.llm.model_name if self.llm else None,
+            "model_loaded": default_backend is not None,
+            "model_name": default_backend.model_id if default_backend else None,
+            "backends": backends_status,
             "retriever_config": {
                 "top_k": self.top_k,
                 "similarity_threshold": self.similarity_threshold,
             },
             "prompt_builder_config": {
-                "max_context_length": self.prompt_builder.max_context_length
+                "max_context_tokens": self.prompt_builder.max_context_tokens
             },
             "llm_config": {
-                "max_new_tokens": self.llm.max_new_tokens if self.llm else None,
-                "temperature": self.llm.temperature if self.llm else None,
-                "do_sample": self.llm.do_sample if self.llm else None,
+                "max_new_tokens": self.max_new_tokens,
+                "temperature": default_backend.inference.temperature
+                if isinstance(default_backend, QwenBackend)
+                else None,
+                "do_sample": default_backend.inference.do_sample
+                if isinstance(default_backend, QwenBackend)
+                else None,
             },
             "memory_info": memory_info,
         }
@@ -304,6 +384,9 @@ class LegalRAGPipeline:
         user_query: Optional[str] = None,
         include_retrieval: bool = True,
         include_debug_info: bool = False,
+        model: Optional[str] = None,
+        external_ok: bool = False,
+        api_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Query using an attached document (PDF/image) via OCR.
 
@@ -312,9 +395,11 @@ class LegalRAGPipeline:
         """
         start_time = time.time()
 
-        if not self.llm:
+        try:
+            backend = self._resolve_backend(model, external_ok, api_key)
+        except (PrivacyGateError, RuntimeError, ValueError) as e:
             return {
-                "error": "LLM not loaded",
+                "error": str(e),
                 "answer": None,
                 "answer_found": False,
                 "confidence": 0.0,
@@ -352,23 +437,25 @@ class LegalRAGPipeline:
                 )
                 retrieval_time = time.time() - retrieval_start
 
-            prompt = self._build_document_prompt(ocr_text, retrieved_chunks, user_query)
-
-            prompt_tokens = 0
-            if self.llm.tokenizer:
-                prompt_tokens = self.llm.tokenizer(
-                    prompt,
-                    truncation=True,
-                    max_length=self.prompt_builder.max_context_length,
-                    return_length=True,
-                )["length"][0]
+            context_block = self._build_document_context(
+                ocr_text, retrieved_chunks, backend
+            )
+            effective_query = user_query or (
+                "Provide a summary and analysis of the attached document, including "
+                "any relevant legal principles, precedents, or findings."
+            )
 
             generation_start = time.time()
-            raw_response = self.llm.generate_response(prompt)
+            gen = backend.generate(
+                context_block=context_block,
+                user_query=effective_query,
+                system_prompt=self.DOCUMENT_SYSTEM_PROMPT,
+                max_new_tokens=self.max_new_tokens,
+            )
             generation_time = time.time() - generation_start
 
             processed = self.post_processor.process_response(
-                raw_response, retrieved_chunks, user_query or ""
+                gen.text, retrieved_chunks, user_query or ""
             )
 
             total_time = time.time() - start_time
@@ -380,15 +467,10 @@ class LegalRAGPipeline:
                 "citations": processed.citations,
                 "sources": processed.sources,
                 "document": document_info,
-                "metrics": {
-                    "ocr_time": 0.0,
-                    "retrieval_time": round(retrieval_time, 3),
-                    "generation_time": round(generation_time, 3),
-                    "total_time": round(total_time, 3),
-                    "chunks_retrieved": len(retrieved_chunks),
-                    "prompt_tokens": prompt_tokens,
-                    "document_pages": document_info["pages"],
-                },
+                "metrics": self._build_metrics(
+                    gen, retrieval_time, generation_time, total_time,
+                    len(retrieved_chunks), extra={"document_pages": document_info["pages"]},
+                ),
             }
 
             if include_debug_info:
@@ -396,7 +478,7 @@ class LegalRAGPipeline:
                     "ocr_text_preview": ocr_text[:500] + "..."
                     if len(ocr_text) > 500
                     else ocr_text,
-                    "raw_response": raw_response,
+                    "raw_response": gen.text,
                     "retrieved_chunks": retrieved_chunks[:3]
                     if retrieved_chunks
                     else [],
@@ -412,64 +494,41 @@ class LegalRAGPipeline:
                 "confidence": 0.0,
             }
 
-    def _build_document_prompt(
+    def _build_document_context(
         self,
         ocr_text: str,
         retrieved_chunks: List[Dict[str, Any]],
-        user_query: Optional[str],
+        backend: LLMBackend,
     ) -> str:
-        """Build prompt for document-based query."""
         max_doc_length = 3000
         if len(ocr_text) > max_doc_length:
             ocr_text = ocr_text[:max_doc_length] + "..."
 
-        prompt_parts = []
-
-        if user_query:
-            prompt_parts.append(f"User Question: {user_query}\n")
-
-        prompt_parts.append("Attached Document (OCR extracted text):\n")
-        prompt_parts.append(ocr_text)
+        parts = [f"Attached Document (OCR extracted text):\n{ocr_text}"]
 
         if retrieved_chunks:
-            prompt_parts.append("\n\nRelevant Legal Context from Database:")
-            for i, chunk in enumerate(retrieved_chunks[:3], 1):
-                prompt_parts.append(
-                    f"\n[{i}] {chunk['case']} ({chunk['court']}, {chunk['year']})"
-                )
-                prompt_parts.append(chunk["text"][:500])
-
-        prompt_parts.append("\n\nInstructions:")
-        prompt_parts.append(
-            "Based on the attached document and any relevant legal context, "
-        )
-
-        if user_query:
-            prompt_parts.append(f"answer the user's question: {user_query}")
-        else:
-            prompt_parts.append(
-                "provide a summary and analysis of the document, including any relevant legal principles, precedents, or findings."
+            case_context = self.prompt_builder.build_context_block(
+                retrieved_chunks, token_counter=backend.count_tokens
             )
+            if case_context:
+                parts.append(f"Relevant Legal Context from Database:\n{case_context}")
 
-        prompt_parts.append(
-            "\n\nIf the document contains court judgments or legal cases, identify:"
-        )
-        prompt_parts.append("- The parties involved")
-        prompt_parts.append("- The key issues addressed")
-        prompt_parts.append("- The court's reasoning and holding")
-        prompt_parts.append("- Any cited precedents")
-
-        prompt_parts.append("\n\nAnswer:")
-
-        return "\n".join(prompt_parts)
+        return "\n\n".join(parts)
 
     def chat(
-        self, user_message: str, include_debug_info: bool = False
+        self,
+        user_message: str,
+        include_debug_info: bool = False,
+        model: Optional[str] = None,
+        external_ok: bool = False,
+        api_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Multi-turn chat with conversation history."""
-        if not self.llm:
+        try:
+            backend = self._resolve_backend(model, external_ok, api_key)
+        except (PrivacyGateError, RuntimeError, ValueError) as e:
             return {
-                "error": "LLM not loaded",
+                "error": str(e),
                 "answer": None,
                 "answer_found": False,
                 "confidence": 0.0,
@@ -485,6 +544,7 @@ class LegalRAGPipeline:
                 query=user_message,
                 candidate_k=self.stage1_k,
                 similarity_threshold=self.stage1_threshold,
+                graph_boost=self.graph_boost,
             )
             retrieved_chunks = self.reranker.rerank(
                 user_message, candidate_chunks, top_n=self.stage2_k
@@ -503,34 +563,31 @@ class LegalRAGPipeline:
                     "conversation_history": self.chat_session.get_history(
                         include_citations=True
                     ),
-                    "metrics": {
-                        "retrieval_time": round(retrieval_time, 3),
-                        "generation_time": 0.0,
-                        "total_time": round(time.time() - start_time, 3),
-                        "chunks_retrieved": 0,
-                    },
+                    "metrics": self._build_metrics(
+                        None, retrieval_time, 0.0, time.time() - start_time, 0
+                    ),
                 }
 
-            conversation_context = self.chat_session.get_conversation_context()
-            prompt = self._build_chat_prompt(
-                retrieved_chunks, user_message, conversation_context
+            # Exclude the current user turn (just appended above) from history —
+            # it's passed to generate() separately as user_query.
+            history = self.chat_session.get_history()[:-1]
+
+            context_block = self.prompt_builder.build_context_block(
+                retrieved_chunks, token_counter=backend.count_tokens
             )
 
-            prompt_tokens = 0
-            if self.llm.tokenizer:
-                prompt_tokens = self.llm.tokenizer(
-                    prompt,
-                    truncation=True,
-                    max_length=self.prompt_builder.max_context_length,
-                    return_length=True,
-                )["length"][0]
-
             generation_start = time.time()
-            raw_response = self.llm.generate_response(prompt)
+            gen = backend.generate(
+                context_block=context_block,
+                user_query=user_message,
+                system_prompt=self.prompt_builder.SYSTEM_PROMPT,
+                conversation_history=history,
+                max_new_tokens=self.max_new_tokens,
+            )
             generation_time = time.time() - generation_start
 
             processed = self.post_processor.process_response(
-                raw_response, retrieved_chunks, user_message
+                gen.text, retrieved_chunks, user_message
             )
 
             total_time = time.time() - start_time
@@ -551,20 +608,17 @@ class LegalRAGPipeline:
                 "conversation_history": self.chat_session.get_history(
                     include_citations=True
                 ),
-                "metrics": {
-                    "retrieval_time": round(retrieval_time, 3),
-                    "generation_time": round(generation_time, 3),
-                    "total_time": round(total_time, 3),
-                    "chunks_retrieved": len(retrieved_chunks),
-                    "prompt_tokens": prompt_tokens,
-                },
+                "metrics": self._build_metrics(
+                    gen, retrieval_time, generation_time, total_time,
+                    len(retrieved_chunks),
+                ),
             }
 
             if include_debug_info:
                 result["debug"] = {
                     "retrieved_chunks": retrieved_chunks[:3],
-                    "raw_response": raw_response,
-                    "conversation_context": conversation_context,
+                    "raw_response": gen.text,
+                    "conversation_history": history,
                 }
 
             return result
@@ -579,40 +633,6 @@ class LegalRAGPipeline:
                     include_citations=True
                 ),
             }
-
-    def _build_chat_prompt(
-        self,
-        retrieved_chunks: List[Dict[str, Any]],
-        current_query: str,
-        conversation_context: str,
-    ) -> str:
-        prompt_parts = []
-
-        if conversation_context:
-            prompt_parts.append("Previous Conversation:")
-            prompt_parts.append(conversation_context)
-            prompt_parts.append("\n---\n")
-
-        prompt_parts.append("Relevant Legal Context:")
-        for i, chunk in enumerate(retrieved_chunks, 1):
-            prompt_parts.append(
-                f"\n[{i}] {chunk['case']} ({chunk['court']}, {chunk['year']})"
-            )
-            prompt_parts.append(chunk["text"][:400])
-
-        prompt_parts.append(f"\n\nCurrent Question: {current_query}")
-        prompt_parts.append("\n\nInstructions:")
-        prompt_parts.append(
-            "Answer the current question based on the legal context above."
-        )
-        prompt_parts.append(
-            "If the question references previous answers, use the conversation history."
-        )
-        prompt_parts.append("Cite sources using [n] notation.")
-
-        prompt_parts.append("\n\nAnswer:")
-
-        return "\n".join(prompt_parts)
 
     def clear_chat_history(self):
         self.chat_session.clear()

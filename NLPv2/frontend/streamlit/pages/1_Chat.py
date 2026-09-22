@@ -6,6 +6,7 @@ from lib.ui_helpers import (
     init_session_state,
     render_api_error,
     render_citations,
+    render_model_selector,
     render_sources,
 )
 
@@ -19,6 +20,7 @@ st.caption(
 )
 
 with st.sidebar:
+    model, external_ok, api_key = render_model_selector("chat")
     include_debug = st.toggle("Include debug info", value=False)
     if st.button("Clear chat", icon=":material/delete_sweep:", width="stretch"):
         try:
@@ -62,14 +64,24 @@ if user_input:
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        with st.status(":shimmer[Retrieving and generating]", type="compact") as status:
-            try:
-                data = api_client.chat(user_input, include_debug=include_debug)
-                status.update(label="Done", state="complete")
-            except Exception as e:
-                status.update(label="Failed", state="error")
-                render_api_error(e)
-                data = None
+        if model and not external_ok:
+            st.warning(
+                "Tick the external-model confirmation checkbox in the sidebar first.",
+                icon=":material/lock:",
+            )
+            data = None
+        else:
+            with st.status(":shimmer[Retrieving and generating]", type="compact") as status:
+                try:
+                    data = api_client.chat(
+                        user_input, include_debug=include_debug,
+                        model=model, external_ok=external_ok, api_key=api_key,
+                    )
+                    status.update(label="Done", state="complete")
+                except Exception as e:
+                    status.update(label="Failed", state="error")
+                    render_api_error(e)
+                    data = None
 
         if data is not None:
             if not data.get("answer_found", True):

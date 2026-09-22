@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from retriever import LegalRetriever
+from retrieval.retriever import LegalRetriever
 from prompt_builder import PromptBuilder
 import json
 

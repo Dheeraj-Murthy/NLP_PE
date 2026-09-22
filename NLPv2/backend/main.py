@@ -57,6 +57,23 @@ def main():
         default=0.0,
         help="Boost retrieval score of high-precedence cases via citation graph PageRank (default: 0.0 = off)",
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model id: omit for local Qwen (default), or claude-*/gpt-* for an external backend",
+    )
+    parser.add_argument(
+        "--external-ok",
+        action="store_true",
+        help="Confirm sending case text to an external model API (required with --model claude-*/gpt-*)",
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help="API key for an external model, overriding ANTHROPIC_API_KEY/OPENAI_API_KEY from .env",
+    )
 
     args = parser.parse_args()
 
@@ -75,11 +92,17 @@ def main():
 
     print("🔍 Initializing Legal RAG System...")
     try:
+        pipeline_kwargs = {}
+        if args.model and not args.model.startswith(("claude-", "gpt-", "o1", "o3")):
+            # A local-model override still loads eagerly as the default backend.
+            pipeline_kwargs["model_name"] = args.model
+
         pipeline = LegalRAGPipeline(
             top_k=args.top_k,
             similarity_threshold=args.threshold,
             load_llm=not args.retrieval_test,
             graph_boost=args.graph_boost,
+            **pipeline_kwargs,
         )
 
         if args.clear_history:
@@ -92,26 +115,29 @@ def main():
         return
 
     if args.test:
-        run_test_queries(pipeline, args.debug)
+        run_test_queries(pipeline, args.debug, args.model, args.external_ok, args.api_key)
     elif args.retrieval_test:
         run_retrieval_test(pipeline)
     elif args.document:
         run_document_query(
-            pipeline, args.document, args.query, not args.no_retrieval, args.debug
+            pipeline, args.document, args.query, not args.no_retrieval, args.debug,
+            args.model, args.external_ok, args.api_key,
         )
     elif args.chat:
-        run_chat_mode(pipeline, args.debug)
+        run_chat_mode(pipeline, args.debug, args.model, args.external_ok, args.api_key)
     elif args.interactive:
-        run_interactive_mode(pipeline, args.debug)
+        run_interactive_mode(pipeline, args.debug, args.model, args.external_ok, args.api_key)
     elif args.query:
-        run_single_query(pipeline, args.query, args.debug)
+        run_single_query(pipeline, args.query, args.debug, args.model, args.external_ok, args.api_key)
 
 
-def run_single_query(pipeline, query, debug=False):
+def run_single_query(pipeline, query, debug=False, model=None, external_ok=False, api_key=None):
     print(f"\n📝 Query: {query}")
     print("-" * 50)
 
-    result = pipeline.query(query, include_debug_info=debug)
+    result = pipeline.query(
+        query, include_debug_info=debug, model=model, external_ok=external_ok, api_key=api_key
+    )
 
     if "error" in result:
         print(f"❌ Error: {result['error']}")
@@ -157,10 +183,13 @@ def run_single_query(pipeline, query, debug=False):
             print(f"   • Raw response: {repr(debug_info['raw_response'])}")
         if "prompt_preview" in debug_info:
             print(f"   • Prompt preview: {debug_info['prompt_preview'][:300]}")
-        print(f"   • LLM config: temp={result.get('metrics', {}).get('temperature', '?')}, do_sample=True")
+        metrics = result.get("metrics", {})
+        print(f"   • Model: {metrics.get('model_id', '?')} ({metrics.get('model_version', '?')})")
+        if "temperature" in metrics:
+            print(f"   • LLM config: temp={metrics['temperature']}, do_sample={metrics.get('do_sample')}")
 
 
-def run_test_queries(pipeline, debug=False):
+def run_test_queries(pipeline, debug=False, model=None, external_ok=False, api_key=None):
     test_queries = [
         "What are the regulations for educational institutions in Karnataka?",
         "How does the Supreme Court interpret fundamental rights?",
@@ -174,7 +203,7 @@ def run_test_queries(pipeline, debug=False):
 
     for i, query in enumerate(test_queries, 1):
         print(f"\n--- Test {i}/{len(test_queries)} ---")
-        run_single_query(pipeline, query, debug)
+        run_single_query(pipeline, query, debug, model, external_ok, api_key)
         print("\n" + "-" * 60)
 
 
@@ -209,7 +238,8 @@ def run_retrieval_test(pipeline):
 
 
 def run_document_query(
-    pipeline, document_path, query=None, include_retrieval=True, debug=False
+    pipeline, document_path, query=None, include_retrieval=True, debug=False,
+    model=None, external_ok=False, api_key=None,
 ):
     print(f"\n📄 Document: {document_path}")
     print("-" * 50)
@@ -240,6 +270,9 @@ def run_document_query(
         user_query=query,
         include_retrieval=include_retrieval,
         include_debug_info=debug,
+        model=model,
+        external_ok=external_ok,
+        api_key=api_key,
     )
 
     if "error" in result:
@@ -276,7 +309,7 @@ def run_document_query(
             print(f"   • Top retrieved: {debug_info['retrieved_chunks'][0]['case']}")
 
 
-def run_chat_mode(pipeline, debug=False):
+def run_chat_mode(pipeline, debug=False, model=None, external_ok=False, api_key=None):
     print("\n💬 Chat mode - Multi-turn conversation with memory")
     print("   Commands: 'quit' to exit, 'clear' to clear history, 'history' to view")
     print("=" * 60)
@@ -302,7 +335,10 @@ def run_chat_mode(pipeline, debug=False):
                     print(f"  {role}: {msg['content'][:100]}...")
                 continue
 
-            result = pipeline.chat(query, include_debug_info=debug)
+            result = pipeline.chat(
+                query, include_debug_info=debug, model=model,
+                external_ok=external_ok, api_key=api_key,
+            )
 
             if "error" in result:
                 print(f"❌ Error: {result['error']}")
@@ -328,7 +364,7 @@ def run_chat_mode(pipeline, debug=False):
             print(f"❌ Error: {e}")
 
 
-def run_interactive_mode(pipeline, debug=False):
+def run_interactive_mode(pipeline, debug=False, model=None, external_ok=False, api_key=None):
     print("\n🔄 Interactive mode - Enter 'quit' to exit")
     print("=" * 60)
 
@@ -342,7 +378,7 @@ def run_interactive_mode(pipeline, debug=False):
                 print("👋 Goodbye!")
                 break
 
-            run_single_query(pipeline, query, debug)
+            run_single_query(pipeline, query, debug, model, external_ok, api_key)
             print("\n" + "-" * 60)
 
         except KeyboardInterrupt:

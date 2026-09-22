@@ -5,7 +5,7 @@ import tempfile
 import os
 
 from rag_pipeline import LegalRAGPipeline
-from citation_graph import CitationGraphManager
+from retrieval.citation_graph import CitationGraphManager
 
 app = FastAPI(
     title="Legal RAG API",
@@ -42,8 +42,12 @@ async def root():
 async def health_check():
     return {
         "status": "healthy",
-        "model_loaded": pipeline.llm is not None if pipeline else False,
+        "model_loaded": pipeline.backends.get("default") is not None if pipeline else False,
     }
+
+
+def _requires_external_ok(model: Optional[str]) -> bool:
+    return bool(model) and model.startswith(("claude-", "gpt-", "o1", "o3"))
 
 
 @app.post("/query")
@@ -52,12 +56,21 @@ async def query_legal(
     top_k: int = Form(8),
     threshold: float = Form(0.3),
     include_debug: bool = Form(False),
+    model: Optional[str] = Form(None),
+    external_ok: bool = Form(False),
+    api_key: Optional[str] = Form(None),
 ):
     if not pipeline:
         raise HTTPException(status_code=500, detail="Pipeline not initialized")
 
+    if _requires_external_ok(model) and not external_ok:
+        raise HTTPException(status_code=400, detail="External model requires external_ok=true")
+
     try:
-        result = pipeline.query(user_query=query, include_debug_info=include_debug)
+        result = pipeline.query(
+            user_query=query, include_debug_info=include_debug,
+            model=model, external_ok=external_ok, api_key=api_key,
+        )
 
         return {"success": True, "data": result}
     except Exception as e:
@@ -65,12 +78,24 @@ async def query_legal(
 
 
 @app.post("/chat")
-async def chat_legal(message: str = Form(...), include_debug: bool = Form(False)):
+async def chat_legal(
+    message: str = Form(...),
+    include_debug: bool = Form(False),
+    model: Optional[str] = Form(None),
+    external_ok: bool = Form(False),
+    api_key: Optional[str] = Form(None),
+):
     if not pipeline:
         raise HTTPException(status_code=500, detail="Pipeline not initialized")
 
+    if _requires_external_ok(model) and not external_ok:
+        raise HTTPException(status_code=400, detail="External model requires external_ok=true")
+
     try:
-        result = pipeline.chat(user_message=message, include_debug_info=include_debug)
+        result = pipeline.chat(
+            user_message=message, include_debug_info=include_debug,
+            model=model, external_ok=external_ok, api_key=api_key,
+        )
 
         return {"success": True, "data": result}
     except Exception as e:
@@ -101,9 +126,15 @@ async def query_document(
     query: Optional[str] = Form(None),
     include_retrieval: bool = Form(True),
     include_debug: bool = Form(False),
+    model: Optional[str] = Form(None),
+    external_ok: bool = Form(False),
+    api_key: Optional[str] = Form(None),
 ):
     if not pipeline:
         raise HTTPException(status_code=500, detail="Pipeline not initialized")
+
+    if _requires_external_ok(model) and not external_ok:
+        raise HTTPException(status_code=400, detail="External model requires external_ok=true")
 
     suffix = os.path.splitext(file.filename)[1]
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -117,6 +148,9 @@ async def query_document(
             user_query=query,
             include_retrieval=include_retrieval,
             include_debug_info=include_debug,
+            model=model,
+            external_ok=external_ok,
+            api_key=api_key,
         )
 
         return {"success": True, "data": result}

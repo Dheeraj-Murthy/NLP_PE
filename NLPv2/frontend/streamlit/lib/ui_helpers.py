@@ -1,12 +1,58 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
 from lib.api_client import LegalRAGAPIError
 
+MODEL_OPTIONS = {
+    "Qwen (local, default)": (None, False),
+    "Claude (Anthropic API)": ("claude-sonnet-5", True),
+    "GPT (OpenAI API)": ("gpt-4o", True),
+}
+
 
 def init_session_state() -> None:
     st.session_state.setdefault("chat_history", [])
+
+
+def render_model_selector(key_prefix: str) -> Tuple[Optional[str], bool, Optional[str]]:
+    """Model picker + privacy gate. Qwen (local) needs no confirmation;
+    picking an external model surfaces a visible warning, requires an
+    explicit checkbox before the caller may pass external_ok=True, and lets
+    the user optionally supply their own API key for that call instead of
+    relying on the server's own ANTHROPIC_API_KEY/OPENAI_API_KEY.
+
+    The key is only ever held in this browser session's st.session_state
+    (in-memory, cleared on refresh/close) and sent on the one request it's
+    used for — it is never written to disk or persisted server-side (see
+    rag_pipeline._resolve_backend, which explicitly avoids caching a
+    caller-supplied key)."""
+    choice = st.selectbox(
+        "Model", list(MODEL_OPTIONS.keys()), key=f"{key_prefix}_model_choice"
+    )
+    model, is_external = MODEL_OPTIONS[choice]
+
+    external_ok = False
+    api_key = None
+    if is_external:
+        provider = "Anthropic" if model.startswith("claude") else "OpenAI"
+        st.caption(
+            f":material/warning: Sends the retrieved case text and your question to "
+            f"{provider}'s API — not local.",
+        )
+        external_ok = st.checkbox(
+            "I understand — send this query externally",
+            key=f"{key_prefix}_external_ok",
+        )
+        api_key = st.text_input(
+            f"{provider} API key (optional)",
+            type="password",
+            key=f"{key_prefix}_api_key",
+            help="Leave blank to use the server's own configured key, if any. "
+            "Held only in this browser session, never saved.",
+        )
+
+    return model, external_ok, (api_key or None)
 
 
 def render_citations(citations: List[str]) -> None:
@@ -49,7 +95,13 @@ def render_metrics(metrics: Dict[str, Any]) -> None:
                 value = metrics[key]
                 st.metric(label, f"{value}{unit}" if unit else value, border=True)
 
-    extra = {k: v for k, v in metrics.items() if k not in {t[0] for t in labels}}
+    if metrics.get("model_id"):
+        st.caption(f":material/smart_toy: {metrics['model_id']} ({metrics.get('model_version', '?')})")
+
+    extra = {
+        k: v for k, v in metrics.items()
+        if k not in {t[0] for t in labels} and k not in ("model_id", "model_version")
+    }
     if extra:
         with st.expander("More metrics", icon=":material/tune:"):
             st.json(extra)
