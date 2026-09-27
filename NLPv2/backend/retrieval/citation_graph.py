@@ -30,7 +30,9 @@ class CitationGraphManager:
         db_password: Optional[str] = None,
     ):
         self.db_host = db_host or os.getenv("DB_HOST", "localhost")
-        self.db_port = db_port or os.getenv("DB_PORT", "5432")
+        # 5433 matches retriever.py's default and the docker-compose host port
+        # mapping — keep these in sync, they drifted apart once already.
+        self.db_port = db_port or os.getenv("DB_PORT", "5433")
         self.db_name = db_name or os.getenv("DB_NAME", "legal_rag")
         self.db_user = db_user or os.getenv("DB_USER", "postgres")
         self.db_password = db_password or os.getenv("DB_PASSWORD", "postgres")
