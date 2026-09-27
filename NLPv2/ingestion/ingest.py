@@ -99,6 +99,75 @@ def clean_judgment_text(text: str) -> str:
     return cleaned.strip()
 
 
+_MONTH_RE = re.compile(
+    r'(?i)\b(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\b'
+)
+_BENCH_PAREN_RE = re.compile(r'\(([^)]*JJ?\.?)\)', re.IGNORECASE)
+_CAUSE_TITLE_SEPARATOR_RE = re.compile(r'^[A-D]?\s*(v\.?|vs\.?|versus)\s*$', re.IGNORECASE)
+_MARGIN_MARKER_RE = re.compile(r'^[A-D]\s+')
+
+
+def _strip_margin_marker(line: str) -> str:
+    """Older Supreme Court Reports-style scans (pre-JUDIS digitization,
+    spanning the corpus's older decades) prefix lines with a single-letter
+    side-margin marker (A/B/C/D) left over from the original two-column
+    typeset layout — strip it so it doesn't leak into extracted names."""
+    return _MARGIN_MARKER_RE.sub('', line).strip()
+
+
+def _parse_cause_title_fallback(
+    lines: List[str],
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Fallback for judgments that don't use PETITIONER:/RESPONDENT: labels
+    at all — common in the older part of the corpus, which instead lays out
+    a plain cause title:
+        <petitioner name(s)>
+                v.
+        <respondent name(s)>
+    Returns (petitioner, respondent, bench_text) — any of which may be None
+    if the line count didn't sit within the header window or an entry is
+    genuinely absent.
+    """
+    separator_index = None
+    for i, raw_line in enumerate(lines[:20]):
+        stripped = _strip_margin_marker(raw_line)
+        if stripped and _CAUSE_TITLE_SEPARATOR_RE.match(stripped):
+            separator_index = i
+            break
+
+    if separator_index is None:
+        return None, None, None
+
+    petitioner_lines: List[str] = []
+    for raw_line in reversed(lines[:separator_index]):
+        stripped = _strip_margin_marker(raw_line)
+        if not stripped:
+            if petitioner_lines:
+                break
+            continue
+        petitioner_lines.insert(0, stripped)
+
+    respondent_lines: List[str] = []
+    bench_text = None
+    for raw_line in lines[separator_index + 1 :]:
+        stripped = _strip_margin_marker(raw_line)
+        if not stripped:
+            if respondent_lines:
+                break
+            continue
+        bench_match = _BENCH_PAREN_RE.search(stripped)
+        if bench_match:
+            bench_text = bench_match.group(1)
+            break
+        if _MONTH_RE.search(stripped):
+            break
+        respondent_lines.append(stripped)
+
+    petitioner = ' '.join(petitioner_lines).strip() or None
+    respondent = ' '.join(respondent_lines).strip() or None
+    return petitioner, respondent, bench_text
+
+
 def parse_judgment_metadata(text: str, filename: str) -> Dict[str, Any]:
     """
     Extract metadata from judgment text.
@@ -132,6 +201,12 @@ def parse_judgment_metadata(text: str, filename: str) -> Dict[str, Any]:
                 ['DATE OF JUDGMENT:', 'BENCH:', 'ACT:']
             )
 
+    fallback_bench_text = None
+    if not petitioner_name or not respondent_name:
+        fb_petitioner, fb_respondent, fallback_bench_text = _parse_cause_title_fallback(header_lines)
+        petitioner_name = petitioner_name or fb_petitioner
+        respondent_name = respondent_name or fb_respondent
+
     if petitioner_name:
         metadata['petitioner'] = petitioner_name
     if respondent_name:
@@ -149,8 +224,8 @@ def parse_judgment_metadata(text: str, filename: str) -> Dict[str, Any]:
 
     bench_pattern = r'BENCH:\s*\[?([^\]\n]+)'
     bench_match = re.search(bench_pattern, text)
-    if bench_match:
-        bench_text = bench_match.group(1).strip()
+    bench_text = bench_match.group(1).strip() if bench_match else fallback_bench_text
+    if bench_text:
         judges = re.findall(
             r'([A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z])?)\s*\.?\s*J\.?',
             bench_text
