@@ -472,6 +472,20 @@ def main():
             f"\nProcessing complete. "
             f"Successfully ingested {successful}/{len(pdf_files)} judgments."
         )
+
+        # Small run manifest — gives a DVC pipeline stage a file-based output
+        # to hash/cache, since ingestion otherwise writes only to Postgres.
+        manifest = {
+            "input_dir": str(input_dir),
+            "pdf_count": len(pdf_files),
+            "successful": successful,
+            "failed": len(pdf_files) - successful,
+            "embedding_model": "BAAI/bge-base-en-v1.5",
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        manifest_path = Path("outputs/ingest_manifest.json")
+        manifest_path.parent.mkdir(exist_ok=True)
+        manifest_path.write_text(json.dumps(manifest, indent=2))
     finally:
         conn.close()
 

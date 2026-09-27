@@ -1,0 +1,5 @@
+outs:
+- md5: 886b248dc184cd764e3253c094e264a2
+  size: 7010461
+  hash: md5
+  path: legal_rag_schema.sql

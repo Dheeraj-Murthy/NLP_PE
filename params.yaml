@@ -1,0 +1,2 @@
+ingest:
+  input_dir: fixtures/sample_judgments   # point at the real corpus dir once extracted

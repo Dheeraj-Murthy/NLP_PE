@@ -151,7 +151,7 @@ docker-compose.override.yml
 # Local dev data
 # =========================
 uploads/
-data/
+data/*
 storage/
 
 # =========================
@@ -170,4 +170,14 @@ CLAUDE.md
 # =========================
 # Data
 # =========================
-./data/
+# (redundant with data/* above — kept as an explicit root-anchored glob so
+# the .dvc negation below is unambiguous)
+./data/*
+# DVC pointer files must stay tracked even though the real data under
+# data/ is ignored above — they're small metadata, not the actual corpus.
+!data/*.dvc
+
+# =========================
+# MLflow / ingestion pipeline outputs
+# =========================
+NLPv2/ingestion/outputs/

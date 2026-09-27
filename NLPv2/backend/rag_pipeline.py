@@ -11,6 +11,7 @@ from post_processor import PostProcessor, RAGResponse
 from retrieval.reranker import CrossEncoderReranker
 from document_processor import DocumentProcessor
 from retrieval.citation_graph import CitationGraphManager
+from tracking import log_query_run
 
 DEFAULT_QWEN_MODEL = "Qwen/Qwen2.5-7B-Instruct-1M"
 
@@ -280,6 +281,17 @@ class LegalRAGPipeline:
                     ),
                 }
 
+            log_query_run(
+                endpoint="query",
+                params={
+                    "model_id": gen.model_id,
+                    "top_k": self.stage2_k,
+                    "similarity_threshold": self.similarity_threshold,
+                    "graph_boost": self.graph_boost,
+                },
+                metrics={**result["metrics"], "confidence": result["confidence"]},
+            )
+
             return result
 
         except Exception as e:
@@ -484,6 +496,16 @@ class LegalRAGPipeline:
                     else [],
                 }
 
+            log_query_run(
+                endpoint="document",
+                params={
+                    "model_id": gen.model_id,
+                    "top_k": self.stage2_k,
+                    "similarity_threshold": self.similarity_threshold,
+                },
+                metrics={**result["metrics"], "confidence": result["confidence"]},
+            )
+
             return result
 
         except Exception as e:
@@ -620,6 +642,17 @@ class LegalRAGPipeline:
                     "raw_response": gen.text,
                     "conversation_history": history,
                 }
+
+            log_query_run(
+                endpoint="chat",
+                params={
+                    "model_id": gen.model_id,
+                    "top_k": self.stage2_k,
+                    "similarity_threshold": self.similarity_threshold,
+                    "graph_boost": self.graph_boost,
+                },
+                metrics={**result["metrics"], "confidence": result["confidence"]},
+            )
 
             return result
 

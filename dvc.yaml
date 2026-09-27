@@ -1,0 +1,13 @@
+stages:
+  ingest:
+    wdir: NLPv2/ingestion
+    cmd: python ingest.py --input ${ingest.input_dir}
+    deps:
+      - ingest.py
+      - ${ingest.input_dir}
+    params:
+      - ../../params.yaml:
+          - ingest.input_dir
+    outs:
+      - outputs/ingest_manifest.json:
+          cache: false
