@@ -4,7 +4,7 @@ import json
 import argparse
 import subprocess
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 import psycopg2
 from psycopg2.extras import execute_values
 from datetime import datetime
