@@ -45,15 +45,27 @@ docker compose -f deploy/docker/docker-compose.yml up -d
 ```
 
 Spins up Postgres (`5432`), the API (`8000`), and the Streamlit frontend
-(`3000`). Or set it up manually:
+(`3000`). Or set it up manually — from this directory, with a venv active:
 
 ```bash
-bash deploy/db_setup/init_db.sh                      # database + schema
+source venv/bin/activate                              # or create one: python3 -m venv venv
+
+bash deploy/db_setup/init_db.sh                       # database + schema
 python ingestion/ingest.py --input /path/to/pdfs      # ingest judgments
-cd backend && python api.py                           # API at :8000
+
+cd backend
+python api.py                                          # API at :8000, docs at /docs
 ```
 
-Try a query from the CLI:
+From another terminal (same venv), start the frontend:
+
+```bash
+cd frontend/streamlit
+pip install -r requirements.txt
+RAG_API_URL=http://localhost:8000 streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+```
+
+Try a query from the CLI instead:
 
 ```bash
 cd backend && python main.py --query "What are the principles of natural justice?"
