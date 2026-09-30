@@ -140,6 +140,10 @@ class LegalRAGPipeline:
             from llm.openai_backend import OpenAIBackend
 
             backend_cls = OpenAIBackend
+        elif model.startswith("gemini-"):
+            from llm.gemini_backend import GeminiBackend
+
+            backend_cls = GeminiBackend
         else:
             raise ValueError(f"Unknown model: {model}")
 

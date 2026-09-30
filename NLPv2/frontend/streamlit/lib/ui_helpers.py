@@ -8,6 +8,7 @@ MODEL_OPTIONS = {
     "Qwen (local, default)": (None, False),
     "Claude (Anthropic API)": ("claude-sonnet-5", True),
     "GPT (OpenAI API)": ("gpt-4o", True),
+    "Gemini (Google API)": ("gemini-2.5-pro", True),
 }
 
 
@@ -35,7 +36,12 @@ def render_model_selector(key_prefix: str) -> Tuple[Optional[str], bool, Optiona
     external_ok = False
     api_key = None
     if is_external:
-        provider = "Anthropic" if model.startswith("claude") else "OpenAI"
+        if model.startswith("claude"):
+            provider = "Anthropic"
+        elif model.startswith("gemini"):
+            provider = "Google"
+        else:
+            provider = "OpenAI"
         st.caption(
             f":material/warning: Sends the retrieved case text and your question to "
             f"{provider}'s API — not local.",

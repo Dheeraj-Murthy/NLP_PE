@@ -47,7 +47,7 @@ async def health_check():
 
 
 def _requires_external_ok(model: Optional[str]) -> bool:
-    return bool(model) and model.startswith(("claude-", "gpt-", "o1", "o3"))
+    return bool(model) and model.startswith(("claude-", "gpt-", "o1", "o3", "gemini-"))
 
 
 @app.post("/query")

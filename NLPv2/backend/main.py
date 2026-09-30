@@ -93,7 +93,7 @@ def main():
     print("🔍 Initializing Legal RAG System...")
     try:
         pipeline_kwargs = {}
-        if args.model and not args.model.startswith(("claude-", "gpt-", "o1", "o3")):
+        if args.model and not args.model.startswith(("claude-", "gpt-", "o1", "o3", "gemini-")):
             # A local-model override still loads eagerly as the default backend.
             pipeline_kwargs["model_name"] = args.model
 
