@@ -21,7 +21,7 @@ with st.container(horizontal=True):
     include_retrieval = st.toggle("Cross-reference case law", value=True)
     include_debug = st.toggle("Include debug info", value=False)
 
-model, external_ok, api_key = render_model_selector("document")
+model, external_ok, api_key, is_external = render_model_selector("document")
 
 if st.button(
     "Analyze document",
@@ -29,8 +29,13 @@ if st.button(
     type="primary",
     disabled=uploaded_file is None,
 ):
-    if model and not external_ok:
-        st.warning("Tick the external-model confirmation checkbox first.", icon=":material/lock:")
+    if is_external and (not external_ok or not model):
+        st.warning(
+            "Tick the external-model confirmation checkbox and pick a model first."
+            if not external_ok
+            else "Pick a model first (test your API key if you haven't).",
+            icon=":material/lock:",
+        )
     else:
         with st.spinner("Uploading and processing (OCR + generation can take several minutes)..."):
             try:
@@ -51,7 +56,9 @@ if st.button(
                 st.session_state.last_document_result = None
 
 result = st.session_state.get("last_document_result")
-if result:
+if result and result.get("error"):
+    st.error(result["error"], icon=":material/error:")
+elif result:
     doc = result.get("document", {})
     if doc:
         st.badge(

@@ -20,7 +20,7 @@ st.caption(
 )
 
 with st.sidebar:
-    model, external_ok, api_key = render_model_selector("chat")
+    model, external_ok, api_key, is_external = render_model_selector("chat")
     include_debug = st.toggle("Include debug info", value=False)
     if st.button("Clear chat", icon=":material/delete_sweep:", width="stretch"):
         try:
@@ -64,9 +64,13 @@ if user_input:
         st.markdown(user_input)
 
     with st.chat_message("assistant"):
-        if model and not external_ok:
+        if is_external and (not external_ok or not model):
             st.warning(
-                "Tick the external-model confirmation checkbox in the sidebar first.",
+                "Tick the external-model confirmation checkbox and pick a model "
+                "in the sidebar first."
+                if not external_ok
+                else "Pick a model in the sidebar first (test your API key if you "
+                "haven't).",
                 icon=":material/lock:",
             )
             data = None

@@ -17,7 +17,7 @@ def init_session_state() -> None:
     st.session_state.setdefault("chat_history", [])
 
 
-def render_model_selector(key_prefix: str) -> Tuple[Optional[str], bool, Optional[str]]:
+def render_model_selector(key_prefix: str) -> Tuple[Optional[str], bool, Optional[str], bool]:
     """Model picker + privacy gate. Qwen (local) needs no confirmation;
     picking an external model surfaces a visible warning, requires an
     explicit checkbox before the caller may pass external_ok=True, and lets
@@ -62,16 +62,19 @@ def render_model_selector(key_prefix: str) -> Tuple[Optional[str], bool, Optiona
         if model.startswith("gemini"):
             model = _render_gemini_model_picker(key_prefix, api_key, default_model=model)
 
-    return model, external_ok, (api_key or None)
+    return model, external_ok, (api_key or None), is_external
 
 
 def _render_gemini_model_picker(
     key_prefix: str, api_key: Optional[str], default_model: str
-) -> str:
+) -> Optional[str]:
     """Test button validates the key against Gemini's ListModels API and, on
-    success, shows a dropdown of the models that key can actually call
-    generateContent on. Falls back to `default_model` until tested, so a
-    user can still skip straight to chatting on the pinned default model."""
+    success, shows a dropdown of only the models that key can actually call
+    generateContent on. No hardcoded fallback — Google deprecates/renames
+    model ids over time (e.g. gemini-2.5-pro 404ing for new keys), so a
+    stale pinned default would silently route to a dead model instead of
+    one this key can really use. Returns None (blocking send) until a real,
+    tested model is chosen."""
     models_state_key = f"{key_prefix}_gemini_models"
     tested_key_state = f"{key_prefix}_gemini_tested_key"
 
@@ -107,7 +110,15 @@ def _render_gemini_model_picker(
             key=f"{key_prefix}_gemini_model_choice",
         )
 
-    return default_model
+    if available_models is not None:
+        # Tested successfully but the key has access to nothing usable.
+        st.warning(
+            "This key has no models available that support generateContent.",
+            icon=":material/block:",
+        )
+    else:
+        st.caption("Test your API key to pick from the models it can actually access.")
+    return None
 
 
 def render_citations(citations: List[str]) -> None:

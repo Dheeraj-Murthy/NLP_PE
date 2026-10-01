@@ -22,12 +22,17 @@ with st.form("single_query_form"):
         top_k = st.slider("top_k", min_value=1, max_value=20, value=8)
         threshold = st.slider("Similarity threshold", min_value=0.0, max_value=1.0, value=0.3, step=0.05)
         include_debug = st.toggle("Include debug info", value=False)
-    model, external_ok, api_key = render_model_selector("single_query")
+    model, external_ok, api_key, is_external = render_model_selector("single_query")
     submitted = st.form_submit_button("Run query", icon=":material/play_arrow:", type="primary")
 
 if submitted and query_text.strip():
-    if model and not external_ok:
-        st.warning("Tick the external-model confirmation checkbox first.", icon=":material/lock:")
+    if is_external and (not external_ok or not model):
+        st.warning(
+            "Tick the external-model confirmation checkbox and pick a model first."
+            if not external_ok
+            else "Pick a model first (test your API key if you haven't).",
+            icon=":material/lock:",
+        )
         st.session_state.last_query_result = None
     else:
         with st.spinner("Retrieving and generating..."):
