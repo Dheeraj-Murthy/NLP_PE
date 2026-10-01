@@ -1,8 +1,10 @@
+import concurrent.futures
 import os
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from llm.base import GenerationResult, LLMBackend
@@ -79,11 +81,41 @@ class GeminiBackend(LLMBackend):
 
 
 def list_available_models(api_key: str) -> List[str]:
-    """Models this key can call generateContent on. Raises google.genai.errors.ClientError
-    (e.g. API_KEY_INVALID) if the key itself is bad."""
+    """Models this key can actually call generateContent on. Raises
+    google.genai.errors.ClientError (e.g. API_KEY_INVALID) if the key itself is bad.
+
+    ListModels is a static catalog, not a per-key access list — it still lists
+    models like gemini-2.5-pro as generateContent-capable even when a given
+    key gets "this model is no longer available to new users" on the real
+    call. So each catalog candidate is live-probed with a 1-token request;
+    only models that don't 403/404 for this specific key are kept.
+    """
     client = genai.Client(api_key=api_key)
-    names = []
-    for m in client.models.list():
-        if m.name and "generateContent" in (m.supported_actions or []):
-            names.append(m.name.split("/")[-1])
-    return sorted(names)
+    candidates = sorted(
+        {
+            m.name.split("/")[-1]
+            for m in client.models.list()
+            if m.name and "generateContent" in (m.supported_actions or [])
+        }
+    )
+
+    def _is_usable(name: str) -> bool:
+        try:
+            client.models.generate_content(
+                model=name,
+                contents=[types.Content(role="user", parts=[types.Part(text="hi")])],
+                config=types.GenerateContentConfig(max_output_tokens=1),
+            )
+            return True
+        except genai_errors.ClientError as e:
+            # 403/404 = this key genuinely can't use the model. Anything else
+            # (e.g. 429 rate limit) means it's reachable, just throttled right
+            # now — don't punish it for that.
+            return e.code not in (403, 404)
+        except Exception:
+            return True
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        usable = list(pool.map(_is_usable, candidates))
+
+    return [name for name, ok in zip(candidates, usable) if ok]
