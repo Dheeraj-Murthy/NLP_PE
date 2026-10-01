@@ -77,13 +77,18 @@ if user_input:
                         user_input, include_debug=include_debug,
                         model=model, external_ok=external_ok, api_key=api_key,
                     )
-                    status.update(label="Done", state="complete")
+                    status.update(
+                        label="Failed" if data.get("error") else "Done",
+                        state="error" if data.get("error") else "complete",
+                    )
                 except Exception as e:
                     status.update(label="Failed", state="error")
                     render_api_error(e)
                     data = None
 
-        if data is not None:
+        if data is not None and data.get("error"):
+            st.error(data["error"], icon=":material/error:")
+        elif data is not None:
             if not data.get("answer_found", True):
                 st.warning(data["answer"], icon=":material/search_off:")
             else:

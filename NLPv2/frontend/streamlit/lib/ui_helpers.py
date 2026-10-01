@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import streamlit as st
 
+from lib import api_client
 from lib.api_client import LegalRAGAPIError
 
 MODEL_OPTIONS = {
@@ -58,7 +59,55 @@ def render_model_selector(key_prefix: str) -> Tuple[Optional[str], bool, Optiona
             "Held only in this browser session, never saved.",
         )
 
+        if model.startswith("gemini"):
+            model = _render_gemini_model_picker(key_prefix, api_key, default_model=model)
+
     return model, external_ok, (api_key or None)
+
+
+def _render_gemini_model_picker(
+    key_prefix: str, api_key: Optional[str], default_model: str
+) -> str:
+    """Test button validates the key against Gemini's ListModels API and, on
+    success, shows a dropdown of the models that key can actually call
+    generateContent on. Falls back to `default_model` until tested, so a
+    user can still skip straight to chatting on the pinned default model."""
+    models_state_key = f"{key_prefix}_gemini_models"
+    tested_key_state = f"{key_prefix}_gemini_tested_key"
+
+    # Key changed since last successful test — stale model list no longer applies.
+    if st.session_state.get(tested_key_state) != api_key:
+        st.session_state[models_state_key] = None
+
+    if st.button(
+        "Test API key", key=f"{key_prefix}_test_gemini_key", disabled=not api_key
+    ):
+        try:
+            st.session_state[models_state_key] = api_client.gemini_models(api_key)
+            st.session_state[tested_key_state] = api_key
+        except Exception as e:
+            st.session_state[models_state_key] = None
+            render_api_error(e)
+
+    available_models = st.session_state.get(models_state_key)
+    if available_models:
+        st.success(
+            f"Key valid — {len(available_models)} model(s) available.",
+            icon=":material/check_circle:",
+        )
+        default_index = (
+            available_models.index(default_model)
+            if default_model in available_models
+            else 0
+        )
+        return st.selectbox(
+            "Gemini model",
+            available_models,
+            index=default_index,
+            key=f"{key_prefix}_gemini_model_choice",
+        )
+
+    return default_model
 
 
 def render_citations(citations: List[str]) -> None:

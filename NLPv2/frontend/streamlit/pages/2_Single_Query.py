@@ -42,7 +42,9 @@ if submitted and query_text.strip():
                 st.session_state.last_query_result = None
 
 result = st.session_state.get("last_query_result")
-if result:
+if result and result.get("error"):
+    st.error(result["error"], icon=":material/error:")
+elif result:
     with st.container(border=True):
         if not result.get("answer_found", True):
             st.warning(result["answer"], icon=":material/search_off:")

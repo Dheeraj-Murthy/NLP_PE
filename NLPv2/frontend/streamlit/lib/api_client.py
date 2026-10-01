@@ -104,6 +104,16 @@ def chat(
     return _handle_response(resp)["data"]
 
 
+def gemini_models(api_key: str) -> List[str]:
+    try:
+        resp = requests.post(
+            _url("/models/gemini"), data={"api_key": api_key}, timeout=DEFAULT_TIMEOUT
+        )
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    return _handle_response(resp)["data"]["models"]
+
+
 def chat_clear() -> None:
     try:
         resp = requests.post(_url("/chat/clear"), timeout=DEFAULT_TIMEOUT)

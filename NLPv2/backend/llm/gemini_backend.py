@@ -76,3 +76,14 @@ class GeminiBackend(LLMBackend):
     @property
     def model_id(self) -> str:
         return self._model_id
+
+
+def list_available_models(api_key: str) -> List[str]:
+    """Models this key can call generateContent on. Raises google.genai.errors.ClientError
+    (e.g. API_KEY_INVALID) if the key itself is bad."""
+    client = genai.Client(api_key=api_key)
+    names = []
+    for m in client.models.list():
+        if m.name and "generateContent" in (m.supported_actions or []):
+            names.append(m.name.split("/")[-1])
+    return sorted(names)
