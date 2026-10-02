@@ -94,6 +94,14 @@ def list_available_models(api_key: str) -> List[str]:
     call. So each catalog candidate is live-probed; only models that don't
     403/404 for this specific key are kept.
 
+    The catalog also isn't scoped to the "Gemini" product line — a key with
+    broad access sees generateContent-capable entries from other Google model
+    families sharing the same endpoint (e.g. deep-research-*, antigravity-*).
+    Those aren't routable: rag_pipeline._resolve_backend dispatches purely on
+    an id starting with "gemini-" and raises "Unknown model" for anything
+    else, so a key that could technically reach them would still fail here
+    with an unrelated-looking error. Only "gemini-"-prefixed ids are kept.
+
     The probe uses countTokens rather than generateContent — it hits the same
     per-model access check (a restricted/deprecated model 404s there too) but
     does no generation, so it's cheaper, faster, and not subject to
@@ -107,7 +115,9 @@ def list_available_models(api_key: str) -> List[str]:
         {
             m.name.split("/")[-1]
             for m in client.models.list()
-            if m.name and "generateContent" in (m.supported_actions or [])
+            if m.name
+            and m.name.split("/")[-1].startswith("gemini-")
+            and "generateContent" in (m.supported_actions or [])
         }
     )
 
