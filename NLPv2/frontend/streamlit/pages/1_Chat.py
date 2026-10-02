@@ -5,9 +5,8 @@ from lib.ui_helpers import (
     confidence_badge,
     init_session_state,
     render_api_error,
-    render_citations,
     render_model_selector,
-    render_sources,
+    render_sectioned_sources_and_citations,
 )
 
 st.set_page_config(page_title="Chat — Legal RAG", page_icon=":material/chat:", layout="wide")
@@ -50,8 +49,7 @@ for turn in st.session_state.chat_history:
         if turn["role"] == "assistant":
             if turn.get("confidence") is not None:
                 confidence_badge(turn["confidence"])
-            render_citations(turn.get("citations", []))
-            render_sources(turn.get("sources", []))
+            render_sectioned_sources_and_citations(turn)
             if turn.get("debug"):
                 with st.expander("Debug info", icon=":material/bug_report:"):
                     st.json(turn["debug"])
@@ -101,8 +99,7 @@ if user_input:
             confidence = data.get("confidence")
             if confidence is not None:
                 confidence_badge(confidence)
-            render_citations(data.get("citations", []))
-            render_sources(data.get("sources", []))
+            render_sectioned_sources_and_citations(data)
             if data.get("debug"):
                 with st.expander("Debug info", icon=":material/bug_report:"):
                     st.json(data["debug"])
@@ -113,6 +110,8 @@ if user_input:
                     "content": data["answer"],
                     "citations": data.get("citations", []),
                     "sources": data.get("sources", []),
+                    "citations_by_type": data.get("citations_by_type"),
+                    "sources_by_type": data.get("sources_by_type"),
                     "confidence": confidence,
                     "debug": data.get("debug"),
                 }

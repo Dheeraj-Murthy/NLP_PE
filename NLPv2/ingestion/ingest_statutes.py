@@ -61,18 +61,24 @@ def create_tables(conn):
 
 
 def upsert_statute(cur, title: str, short_title: str, year: int) -> int:
-    """Insert statute row; return id (reuses existing via ON CONFLICT)."""
-    cur.execute(
-        """INSERT INTO statutes (title, short_title, year)
-           VALUES (%s, %s, %s)
-           ON CONFLICT DO NOTHING
-           RETURNING id""",
-        (title, short_title, year),
-    )
+    """Insert statute row; return id (reuses existing row by title).
+
+    statutes.title has no UNIQUE constraint, so `ON CONFLICT DO NOTHING`
+    here was a silent no-op — every call inserted a fresh row and
+    re-running this script on the same PDFs kept creating duplicate
+    statutes (and duplicate statute_sections under each one). Look up
+    first instead of relying on a conflict that can never fire.
+    """
+    cur.execute("SELECT id FROM statutes WHERE title=%s", (title,))
     row = cur.fetchone()
     if row:
         return row[0]
-    cur.execute("SELECT id FROM statutes WHERE title=%s", (title,))
+    cur.execute(
+        """INSERT INTO statutes (title, short_title, year)
+           VALUES (%s, %s, %s)
+           RETURNING id""",
+        (title, short_title, year),
+    )
     return cur.fetchone()[0]
 
 
@@ -103,15 +109,38 @@ _ARTICLE_RE = re.compile(
     re.M,
 )
 
+# Amendment-history footnotes ("21. Ins. by the Constitution (Forty-fourth
+# Amendment) Act, 1978...") match _ARTICLE_RE's shape too and recur
+# throughout the document reusing the same numbers as real articles. Since
+# ingestion upserts on (statute_id, section_number) with DO UPDATE, a
+# footnote match occurring after the real article in document order would
+# silently overwrite the real article's content — so these must never be
+# treated as a header in the first place.
+_FOOTNOTE_HEADING_RE = re.compile(r"^(Ins|Subs|Rep|Am|Omitted)\.\s", re.IGNORECASE)
+
 
 def parse_constitution(text: str) -> List[Dict]:
     """Split text into article chunks."""
     # Find all article header positions
     headers = list(_ARTICLE_RE.finditer(text))
     sections: List[Dict] = []
+    max_seen = 0
     for i, m in enumerate(headers):
         art_num = m.group(1)
         heading = m.group(2).strip()
+        if _FOOTNOTE_HEADING_RE.match(heading):
+            continue
+        num = int(re.match(r"\d+", art_num).group())
+        if max_seen > 50 and num < max_seen - 20:
+            # Articles run 1→395 roughly monotonically through the document
+            # (lettered insertions like 31A never move the base number
+            # backwards). A sharp drop this far in means we've left the
+            # Articles and entered a Schedule/Appendix, which independently
+            # restarts its own paragraph numbering — e.g. the Ninth
+            # Schedule's own "21. Amendment of the Schedule.—" clause would
+            # otherwise overwrite the real Article 21 via the upsert.
+            break
+        max_seen = max(max_seen, num)
         end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
         content = text[m.end():end].strip()
         # Remove running headers/footnotes that start with page markers

@@ -1,8 +1,17 @@
 import os
+import re
 import psycopg2
 import json
 from typing import List, Dict, Any, Optional, Tuple
 from sentence_transformers import SentenceTransformer
+
+
+# Explicit "article N" / "section N" references in a query let us skip
+# straight to the row instead of hoping dense/BM25 surface it — bare
+# digits like "21" are weakly weighted by tsvector tokenization, and the
+# word "article" never appears inside the article's own body text.
+_ARTICLE_REF_RE = re.compile(r"\b(?:article|art\.?)\s+(\d{1,3}[a-zA-Z]?)\b", re.IGNORECASE)
+_SECTION_REF_RE = re.compile(r"\b(?:section|sec\.?)\s+(\d{1,3}[a-zA-Z]?)\b", re.IGNORECASE)
 
 
 def _default_db_connection_string() -> str:
@@ -203,15 +212,71 @@ class LegalRetriever:
             cur.close()
             conn.close()
 
+    def _extract_explicit_section_ref(self, query: str) -> Optional[Tuple[str, str]]:
+        """Detects an explicit 'article N'/'art. N' (-> Constitution) or
+        'section N'/'sec. N' (-> BNS) reference in the query. Returns
+        (statute_short_title, section_number) or None. "article" only ever
+        refers to the Constitution and "section" is BNS's own terminology,
+        so the keyword alone disambiguates between the two ingested statutes."""
+        m = _ARTICLE_REF_RE.search(query)
+        if m:
+            return ("Constitution", m.group(1))
+        m = _SECTION_REF_RE.search(query)
+        if m:
+            return ("BNS", m.group(1))
+        return None
+
+    def _fetch_section_by_number(
+        self, cur, statute_short_title: str, section_number: str
+    ) -> Optional[Dict[str, Any]]:
+        cur.execute(
+            """
+            SELECT ss.section_id, st.title, ss.section_number, ss.content
+            FROM statute_sections ss
+            JOIN statutes st ON st.id = ss.statute_id
+            WHERE st.short_title = %s AND ss.section_number ILIKE %s
+            LIMIT 1
+            """,
+            (statute_short_title, section_number),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        sid, title, sec_num, content = row
+        return {
+            "doc_type": "statute",
+            "chunk_id": sid,
+            "text": content.strip(),
+            "case": title,
+            "court": "Statute",
+            "year": None,
+            "para": f"§{sec_num}",
+            "section": "statute",
+            "statute_name": title,
+            "section_number": sec_num,
+            "similarity": 1.0,
+            "rrf_score": float("inf"),
+            "exact_match": True,
+        }
+
     def retrieve_statute_candidates(
-        self, query: str, candidate_k: int = 15
+        self,
+        query: str,
+        candidate_k: int = 15,
+        similarity_threshold: float = 0.2,
+        rrf_k: int = 60,
     ) -> List[Dict[str, Any]]:
-        """Retrieve statute sections: dense + bm25 over statute tables, fused with RRF."""
+        """Retrieve statute sections: dense + bm25 over statute tables, fused with RRF.
+        An explicit 'article N'/'section N' reference in the query is looked up
+        directly and guaranteed to rank first, regardless of its dense/BM25 scores."""
         query_embedding = self.get_query_embedding(query)
         conn = psycopg2.connect(self.db_connection_string)
         cur = conn.cursor()
 
         try:
+            ref = self._extract_explicit_section_ref(query)
+            exact_chunk = self._fetch_section_by_number(cur, ref[0], ref[1]) if ref else None
+
             # Dense leg
             cur.execute(
                 """
@@ -221,11 +286,11 @@ class LegalRetriever:
                 FROM statute_embeddings se
                 JOIN statute_sections ss ON ss.section_id = se.section_id
                 JOIN statutes st ON st.id = ss.statute_id
-                WHERE 1 - (se.embedding <=> %s::vector) >= 0.2
+                WHERE 1 - (se.embedding <=> %s::vector) >= %s
                 ORDER BY se.embedding <=> %s::vector
                 LIMIT %s
                 """,
-                (query_embedding, query_embedding, query_embedding, candidate_k),
+                (query_embedding, query_embedding, similarity_threshold, query_embedding, candidate_k),
             )
             dense = cur.fetchall()
 
@@ -245,7 +310,6 @@ class LegalRetriever:
             )
             bm25 = cur.fetchall()
 
-            rrf_k = 60
             fused: Dict[str, Dict[str, Any]] = {}
             scores: Dict[str, float] = {}
 
@@ -292,6 +356,11 @@ class LegalRetriever:
                 fused[key]["rrf_score"] = s
 
             ranked = sorted(fused.values(), key=lambda c: c["rrf_score"], reverse=True)
+
+            if exact_chunk:
+                ranked = [c for c in ranked if c["chunk_id"] != exact_chunk["chunk_id"]]
+                ranked = [exact_chunk] + ranked
+
             return ranked[:candidate_k]
 
         finally:
@@ -372,7 +441,7 @@ class LegalRetriever:
             cur.close()
             conn.close()
 
-    def retrieve_hybrid_candidates(
+    def retrieve_judgment_candidates(
         self,
         query: str,
         candidate_k: int = 30,
@@ -380,17 +449,19 @@ class LegalRetriever:
         rrf_k: int = 60,
         graph_boost: float = 0.0,
     ) -> List[Dict[str, Any]]:
-        """Stage-1 retrieval: fuse dense (pgvector cosine), BM25 (full-text),
-        and statute candidates via Reciprocal Rank Fusion.
+        """Stage-1 retrieval for judgments only: fuse dense (pgvector cosine)
+        and BM25 (full-text) judgment candidates via Reciprocal Rank Fusion.
         Optional graph_boost > 0 reweights RRF scores using PageRank centrality.
+        Statutes are retrieved independently via retrieve_statute_candidates —
+        pooling them into one ranked list structurally disadvantaged statutes
+        (they only ever earned one RRF "vote" vs. judgments' two), so the two
+        document types are no longer fused together at all.
         """
         dense_chunks = self.retrieve_candidate_chunks(
             query, candidate_k=candidate_k, similarity_threshold=similarity_threshold
         )
         bm25_chunks = self.retrieve_bm25_candidates(query, candidate_k=candidate_k)
-        statute_chunks = self.retrieve_statute_candidates(query, candidate_k=15)
 
-        # Use string keys to avoid collisions between judgment and statute IDs
         fused: Dict[str, Dict[str, Any]] = {}
         rrf_scores: Dict[str, float] = {}
 
@@ -406,14 +477,6 @@ class LegalRetriever:
                 fused[key] = chunk
             else:
                 fused[key].setdefault("bm25_score", chunk["bm25_score"])
-            rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
-
-        for rank, chunk in enumerate(statute_chunks):
-            key = f"s_{chunk['chunk_id']}"
-            if key not in fused:
-                fused[key] = chunk
-            else:
-                fused[key].setdefault("bm25_score", 0.0)
             rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (rrf_k + rank + 1)
 
         centrality_map = {}

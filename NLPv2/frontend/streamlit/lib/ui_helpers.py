@@ -137,6 +137,46 @@ def render_sources(sources: List[str]) -> None:
             st.markdown(f"- {s}")
 
 
+def _render_type_expander(title: str, icon: str, citations: List[str], sources: List[str]) -> None:
+    with st.expander(f"{title} ({len(citations) or len(sources)})", icon=icon):
+        if citations:
+            st.markdown("**Citations**")
+            for c in citations:
+                st.markdown(f"- {c}")
+        if sources:
+            st.markdown("**Sources**")
+            for s in sources:
+                st.markdown(f"- {s}")
+
+
+def render_sectioned_sources_and_citations(data: Dict[str, Any]) -> None:
+    """Statutes-first, two-expander layout when citations_by_type/
+    sources_by_type are present; falls back to the old flat
+    render_citations/render_sources otherwise (e.g. responses from before
+    this field existed, or any caller that only ever returns flat lists)."""
+    citations_by_type = data.get("citations_by_type")
+    sources_by_type = data.get("sources_by_type")
+
+    if not citations_by_type and not sources_by_type:
+        render_citations(data.get("citations", []))
+        render_sources(data.get("sources", []))
+        return
+
+    statute_citations = (citations_by_type or {}).get("statute", [])
+    statute_sources = (sources_by_type or {}).get("statute", [])
+    judgment_citations = (citations_by_type or {}).get("judgment", [])
+    judgment_sources = (sources_by_type or {}).get("judgment", [])
+
+    if statute_citations or statute_sources:
+        _render_type_expander(
+            "Statutes & Articles", ":material/balance:", statute_citations, statute_sources
+        )
+    if judgment_citations or judgment_sources:
+        _render_type_expander(
+            "Case Law", ":material/gavel:", judgment_citations, judgment_sources
+        )
+
+
 def confidence_badge(confidence: float) -> None:
     if confidence >= 0.7:
         st.badge(f"Confidence {confidence:.0%}", icon=":material/check_circle:", color="green")

@@ -40,7 +40,19 @@ def main():
         help="Clear chat history before starting",
     )
     parser.add_argument(
-        "--top-k", type=int, default=8, help="Number of chunks to retrieve (default: 8)"
+        "--top-k", type=int, default=8, help="Number of judgment chunks to retrieve after rerank (default: 8)"
+    )
+    parser.add_argument(
+        "--judgment-top-k",
+        type=int,
+        default=None,
+        help="Final number of judgment chunks after rerank (default: --top-k value)",
+    )
+    parser.add_argument(
+        "--statute-top-k",
+        type=int,
+        default=4,
+        help="Final number of statute chunks after rerank, retrieved independently of judgments (default: 4)",
     )
     parser.add_argument(
         "--threshold",
@@ -99,6 +111,8 @@ def main():
 
         pipeline = LegalRAGPipeline(
             top_k=args.top_k,
+            judgment_top_k=args.judgment_top_k,
+            statute_top_k=args.statute_top_k,
             similarity_threshold=args.threshold,
             load_llm=not args.retrieval_test,
             graph_boost=args.graph_boost,
@@ -213,6 +227,8 @@ def run_retrieval_test(pipeline):
         "Supreme Court fundamental rights",
         "natural justice principles",
         "contract law requirements",
+        "explain article 21",
+        "what is the punishment for murder under section 103 BNS",
     ]
 
     print(f"\n🔍 Testing retrieval with {len(test_queries)} queries...")
@@ -226,15 +242,17 @@ def run_retrieval_test(pipeline):
             print(f"❌ Error: {result['error']}")
             continue
 
-        print(f"📊 Chunks found: {result['chunks_found']}")
+        print(f"📊 Chunks found: {result['chunks_found']} "
+              f"(statutes: {result.get('statute_chunks_found', 0)}, "
+              f"judgments: {result.get('judgment_chunks_found', 0)})")
         print(f"⏱️  Retrieval time: {result['retrieval_time']}s")
 
         if result["retrieved_chunks"]:
-            print(
-                f"📈 Top similarity: {result['retrieved_chunks'][0]['similarity']:.4f}"
-            )
-            print(f"📚 Top source: {result['retrieved_chunks'][0]['case']}")
-            print(f"💬 Preview: {result['retrieved_chunks'][0]['text'][:100]}...")
+            top = result["retrieved_chunks"][0]
+            print(f"📈 Top similarity: {top['similarity']:.4f}")
+            print(f"📚 Top source: {top['case']}"
+                  + (" [exact match]" if top.get("exact_match") else ""))
+            print(f"💬 Preview: {top['text'][:100]}...")
 
 
 def run_document_query(

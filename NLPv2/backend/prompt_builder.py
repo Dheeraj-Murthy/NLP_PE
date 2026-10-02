@@ -18,6 +18,9 @@ class PromptBuilder:
 
     MIN_USEFUL_TOKENS = 40
 
+    STATUTE_SECTION_HEADER = "## Relevant Statutes & Constitutional Provisions"
+    CASE_LAW_SECTION_HEADER = "## Relevant Case Law"
+
     def __init__(self, max_context_tokens: int = 1200):
         self.max_context_tokens = max_context_tokens
 
@@ -37,6 +40,14 @@ class PromptBuilder:
         post_processor._extract_citations maps [N] back to
         retrieved_chunks[N-1] by that exact positional index, so grouping
         must never renumber.
+
+        Also injects a section header ("## Relevant Statutes & ...", then
+        "## Relevant Case Law") whenever doc_type flips between consecutive
+        groups. The pipeline always hands this method a statute-first,
+        then-judgment-ordered list (see rag_pipeline.py), so in practice
+        this fires at most twice and produces two clean sections — but an
+        unsorted/mixed input would just re-flip the header at every
+        boundary rather than break anything.
         """
         counter = token_counter or self._fallback_token_estimate
         budget = max_tokens if max_tokens is not None else self.max_context_tokens
@@ -44,10 +55,24 @@ class PromptBuilder:
         groups = self._group_chunks(retrieved_chunks)
         blocks: List[str] = []
         used = 0
+        last_doc_type: Optional[str] = None
 
         for _key, header, members in groups:
             if budget - used <= self.MIN_USEFUL_TOKENS:
                 break
+
+            group_doc_type = members[0][1].get("doc_type", "judgment")
+            if group_doc_type != last_doc_type:
+                section_header = (
+                    self.STATUTE_SECTION_HEADER
+                    if group_doc_type == "statute"
+                    else self.CASE_LAW_SECTION_HEADER
+                )
+                header_tokens = counter(section_header)
+                if budget - used - header_tokens > self.MIN_USEFUL_TOKENS:
+                    blocks.append(section_header)
+                    used += header_tokens
+                    last_doc_type = group_doc_type
 
             group_lines = [header]
             group_used = counter(header)

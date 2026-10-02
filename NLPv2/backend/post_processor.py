@@ -1,6 +1,6 @@
 import re
 from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 @dataclass
 class RAGResponse:
@@ -11,6 +11,8 @@ class RAGResponse:
     is_answer_found: bool
     retrieval_count: int
     answer_length: int
+    citations_by_type: Dict[str, List[str]] = field(default_factory=dict)
+    sources_by_type: Dict[str, List[str]] = field(default_factory=dict)
 
 class PostProcessor:
 
@@ -42,6 +44,18 @@ class PostProcessor:
         citations = self._extract_citations(cleaned_answer, retrieved_chunks)
         sources = self._get_unique_sources(retrieved_chunks)
 
+        statute_chunks = [c for c in retrieved_chunks if c.get("doc_type") == "statute"]
+        judgment_chunks = [c for c in retrieved_chunks if c.get("doc_type", "judgment") != "statute"]
+
+        citations_by_type = {
+            "statute": self._extract_citations(cleaned_answer, retrieved_chunks, doc_type_filter="statute"),
+            "judgment": self._extract_citations(cleaned_answer, retrieved_chunks, doc_type_filter="judgment"),
+        }
+        sources_by_type = {
+            "statute": self._get_unique_sources(statute_chunks),
+            "judgment": self._get_unique_sources(judgment_chunks),
+        }
+
         return RAGResponse(
                 answer=cleaned_answer,
                 sources=sources,
@@ -49,7 +63,9 @@ class PostProcessor:
                 confidence_score=confidence_score,
                 is_answer_found=is_answer_found,
                 retrieval_count=len(retrieved_chunks),
-                answer_length=len(cleaned_answer)
+                answer_length=len(cleaned_answer),
+                citations_by_type=citations_by_type,
+                sources_by_type=sources_by_type,
                 )
 
     def _clean_response(self, raw_response: str) -> str:
@@ -146,9 +162,10 @@ class PostProcessor:
         return f"{chunk['case']} ({chunk['year']})"
 
     def _extract_citations(
-            self, 
-            answer: str, 
-            retrieved_chunks: List[Dict[str, Any]]
+            self,
+            answer: str,
+            retrieved_chunks: List[Dict[str, Any]],
+            doc_type_filter: Optional[str] = None,
             ) -> List[str]:
         citations = []
 
@@ -158,6 +175,8 @@ class PostProcessor:
             idx = int(match) - 1
             if 0 <= idx < len(retrieved_chunks):
                 chunk = retrieved_chunks[idx]
+                if doc_type_filter and chunk.get("doc_type", "judgment") != doc_type_filter:
+                    continue
                 citation = self._format_citation(chunk)
                 if citation not in citations:
                     citations.append(citation)
@@ -167,6 +186,8 @@ class PostProcessor:
         for match in para_matches:
             for chunk in retrieved_chunks:
                 if chunk['para'] == f"¶{match}":
+                    if doc_type_filter and chunk.get("doc_type", "judgment") != doc_type_filter:
+                        continue
                     citation = self._format_citation(chunk)
                     if citation not in citations:
                         citations.append(citation)

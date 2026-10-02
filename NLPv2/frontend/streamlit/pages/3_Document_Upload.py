@@ -4,10 +4,9 @@ from lib import api_client
 from lib.ui_helpers import (
     confidence_badge,
     render_api_error,
-    render_citations,
     render_metrics,
     render_model_selector,
-    render_sources,
+    render_sectioned_sources_and_citations,
 )
 
 st.set_page_config(page_title="Document upload — Legal RAG", page_icon=":material/upload_file:", layout="wide")
@@ -78,8 +77,7 @@ elif result:
         if confidence is not None:
             confidence_badge(confidence)
 
-        render_citations(result.get("citations", []))
-        render_sources(result.get("sources", []))
+        render_sectioned_sources_and_citations(result)
 
     st.space("medium")
     render_metrics(result.get("metrics", {}))

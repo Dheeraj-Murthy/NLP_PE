@@ -88,6 +88,8 @@ class LegalRAGPipeline:
         model_name: str = DEFAULT_QWEN_MODEL,
         load_llm: bool = True,
         top_k: int = 8,
+        judgment_top_k: Optional[int] = None,
+        statute_top_k: int = 4,
         similarity_threshold: float = 0.3,
         max_context_tokens: int = 1200,
         max_new_tokens: int = 512,
@@ -100,8 +102,15 @@ class LegalRAGPipeline:
         self.reranker = CrossEncoderReranker()
 
         self.stage1_k = 30
-        self.stage2_k = top_k
+        # Statutes and judgments are retrieved, fused, and reranked as two
+        # fully independent pipelines (never pooled against each other) so
+        # one type can't crowd the other out — see retrieve_judgment_candidates
+        # / retrieve_statute_candidates in retrieval/retriever.py.
+        self.stage2_k = judgment_top_k if judgment_top_k is not None else top_k
+        self.statute_candidate_k = 15
+        self.statute_top_k = statute_top_k
         self.stage1_threshold = 0.2
+        self.statute_similarity_threshold = 0.2
 
         self.prompt_builder = PromptBuilder(max_context_tokens)
 
@@ -168,6 +177,20 @@ class LegalRAGPipeline:
         self.backends[model] = backend
         return backend
 
+    def _rerank_statutes(
+        self, query: str, statute_candidates: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Reranks statute candidates, but keeps any exact-match row (from an
+        explicit 'article N'/'section N' reference in the query) pinned first
+        unconditionally — the cross-encoder scores terse statute text against
+        prose-heavy queries inconsistently, and would otherwise re-sort the
+        guaranteed exact match right out of the final top_n."""
+        exact = [c for c in statute_candidates if c.get("exact_match")]
+        rest = [c for c in statute_candidates if not c.get("exact_match")]
+        remaining_slots = max(self.statute_top_k - len(exact), 0)
+        reranked_rest = self.reranker.rerank(query, rest, top_n=remaining_slots)
+        return exact[: self.statute_top_k] + reranked_rest
+
     def _build_metrics(
         self,
         gen: Optional[GenerationResult],
@@ -214,18 +237,26 @@ class LegalRAGPipeline:
         try:
             retrieval_start = time.time()
 
-            # ✅ STAGE 1: high-recall retrieval
-            candidate_chunks = self.retriever.retrieve_hybrid_candidates(
+            # ✅ STAGE 1: high-recall retrieval — judgments and statutes
+            # independently, never pooled against each other
+            judgment_candidates = self.retriever.retrieve_judgment_candidates(
                 query=user_query,
                 candidate_k=self.stage1_k,
                 similarity_threshold=self.stage1_threshold,
                 graph_boost=self.graph_boost,
             )
-
-            # ✅ STAGE 2: reranking
-            retrieved_chunks = self.reranker.rerank(
-                user_query, candidate_chunks, top_n=self.stage2_k
+            statute_candidates = self.retriever.retrieve_statute_candidates(
+                query=user_query,
+                candidate_k=self.statute_candidate_k,
+                similarity_threshold=self.statute_similarity_threshold,
             )
+
+            # ✅ STAGE 2: reranking — statutes first in the final list
+            reranked_statutes = self._rerank_statutes(user_query, statute_candidates)
+            reranked_judgments = self.reranker.rerank(
+                user_query, judgment_candidates, top_n=self.stage2_k
+            )
+            retrieved_chunks = reranked_statutes + reranked_judgments
 
             retrieval_time = time.time() - retrieval_start
 
@@ -266,6 +297,8 @@ class LegalRAGPipeline:
                 "confidence": processed.confidence_score,
                 "citations": processed.citations,
                 "sources": processed.sources,
+                "citations_by_type": processed.citations_by_type,
+                "sources_by_type": processed.sources_by_type,
                 "precedent_chains": precedent_chains,
                 "metrics": self._build_metrics(
                     gen, retrieval_time, generation_time, total_time,
@@ -338,6 +371,8 @@ class LegalRAGPipeline:
             "confidence": 0.0,
             "citations": [],
             "sources": [],
+            "citations_by_type": {},
+            "sources_by_type": {},
             "metrics": self._build_metrics(
                 None, retrieval_time, 0.0, retrieval_time, 0
             ),
@@ -443,14 +478,22 @@ class LegalRAGPipeline:
             retrieved_chunks = []
             if include_retrieval:
                 retrieval_start = time.time()
-                retrieved_chunks = self.retriever.retrieve_hybrid_candidates(
-                    query=user_query or ocr_text[:500],
+                doc_query = user_query or ocr_text[:500]
+                judgment_candidates = self.retriever.retrieve_judgment_candidates(
+                    query=doc_query,
                     candidate_k=self.stage1_k,
                     similarity_threshold=self.stage1_threshold,
                 )
-                retrieved_chunks = self.reranker.rerank(
-                    user_query or ocr_text[:500], retrieved_chunks, top_n=self.stage2_k
+                statute_candidates = self.retriever.retrieve_statute_candidates(
+                    query=doc_query,
+                    candidate_k=self.statute_candidate_k,
+                    similarity_threshold=self.statute_similarity_threshold,
                 )
+                reranked_statutes = self._rerank_statutes(doc_query, statute_candidates)
+                reranked_judgments = self.reranker.rerank(
+                    doc_query, judgment_candidates, top_n=self.stage2_k
+                )
+                retrieved_chunks = reranked_statutes + reranked_judgments
                 retrieval_time = time.time() - retrieval_start
 
             context_block = self._build_document_context(
@@ -482,6 +525,8 @@ class LegalRAGPipeline:
                 "confidence": processed.confidence_score,
                 "citations": processed.citations,
                 "sources": processed.sources,
+                "citations_by_type": processed.citations_by_type,
+                "sources_by_type": processed.sources_by_type,
                 "document": document_info,
                 "metrics": self._build_metrics(
                     gen, retrieval_time, generation_time, total_time,
@@ -566,15 +611,22 @@ class LegalRAGPipeline:
 
         try:
             retrieval_start = time.time()
-            candidate_chunks = self.retriever.retrieve_hybrid_candidates(
+            judgment_candidates = self.retriever.retrieve_judgment_candidates(
                 query=user_message,
                 candidate_k=self.stage1_k,
                 similarity_threshold=self.stage1_threshold,
                 graph_boost=self.graph_boost,
             )
-            retrieved_chunks = self.reranker.rerank(
-                user_message, candidate_chunks, top_n=self.stage2_k
+            statute_candidates = self.retriever.retrieve_statute_candidates(
+                query=user_message,
+                candidate_k=self.statute_candidate_k,
+                similarity_threshold=self.statute_similarity_threshold,
             )
+            reranked_statutes = self._rerank_statutes(user_message, statute_candidates)
+            reranked_judgments = self.reranker.rerank(
+                user_message, judgment_candidates, top_n=self.stage2_k
+            )
+            retrieved_chunks = reranked_statutes + reranked_judgments
             retrieval_time = time.time() - retrieval_start
 
             if not retrieved_chunks:
@@ -586,6 +638,8 @@ class LegalRAGPipeline:
                     "confidence": 0.0,
                     "citations": [],
                     "sources": [],
+                    "citations_by_type": {},
+                    "sources_by_type": {},
                     "conversation_history": self.chat_session.get_history(
                         include_citations=True
                     ),
@@ -631,6 +685,8 @@ class LegalRAGPipeline:
                 "confidence": processed.confidence_score,
                 "citations": processed.citations,
                 "sources": processed.sources,
+                "citations_by_type": processed.citations_by_type,
+                "sources_by_type": processed.sources_by_type,
                 "conversation_history": self.chat_session.get_history(
                     include_citations=True
                 ),
@@ -680,15 +736,23 @@ class LegalRAGPipeline:
     def test_retrieval_only(self, query: str) -> Dict[str, Any]:
         try:
             start = time.time()
-            chunks = self.retriever.retrieve_hybrid_candidates(
+            judgment_chunks = self.retriever.retrieve_judgment_candidates(
                 query=query,
                 candidate_k=self.stage1_k,
                 similarity_threshold=self.stage1_threshold,
             )
+            statute_chunks = self.retriever.retrieve_statute_candidates(
+                query=query,
+                candidate_k=self.statute_candidate_k,
+                similarity_threshold=self.statute_similarity_threshold,
+            )
+            chunks = statute_chunks + judgment_chunks
             stats = self.retriever.get_retrieval_stats(query)
             return {
                 "query": query,
                 "chunks_found": len(chunks),
+                "statute_chunks_found": len(statute_chunks),
+                "judgment_chunks_found": len(judgment_chunks),
                 "retrieval_time": round(time.time() - start, 3),
                 "retrieved_chunks": chunks[:5],
                 "retrieval_stats": stats,
