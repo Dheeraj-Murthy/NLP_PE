@@ -85,12 +85,13 @@ def _render_gemini_model_picker(
     if st.button(
         "Test API key", key=f"{key_prefix}_test_gemini_key", disabled=not api_key
     ):
-        try:
-            st.session_state[models_state_key] = api_client.gemini_models(api_key)
-            st.session_state[tested_key_state] = api_key
-        except Exception as e:
-            st.session_state[models_state_key] = None
-            render_api_error(e)
+        with st.spinner("Testing key — probing which models it can access..."):
+            try:
+                st.session_state[models_state_key] = api_client.gemini_models(api_key)
+                st.session_state[tested_key_state] = api_key
+            except Exception as e:
+                st.session_state[models_state_key] = None
+                render_api_error(e)
 
     available_models = st.session_state.get(models_state_key)
     if available_models:

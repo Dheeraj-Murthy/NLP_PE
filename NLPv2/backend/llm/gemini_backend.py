@@ -80,17 +80,29 @@ class GeminiBackend(LLMBackend):
         return self._model_id
 
 
+PROBE_TIMEOUT_MS = 10_000  # per-call cap — the SDK's default is no timeout at
+# all (an unreachable/hanging model would block its worker thread forever)
+
+
 def list_available_models(api_key: str) -> List[str]:
-    """Models this key can actually call generateContent on. Raises
-    google.genai.errors.ClientError (e.g. API_KEY_INVALID) if the key itself is bad.
+    """Models this key can actually use. Raises google.genai.errors.ClientError
+    (e.g. API_KEY_INVALID) if the key itself is bad.
 
     ListModels is a static catalog, not a per-key access list — it still lists
     models like gemini-2.5-pro as generateContent-capable even when a given
     key gets "this model is no longer available to new users" on the real
-    call. So each catalog candidate is live-probed with a 1-token request;
-    only models that don't 403/404 for this specific key are kept.
+    call. So each catalog candidate is live-probed; only models that don't
+    403/404 for this specific key are kept.
+
+    The probe uses countTokens rather than generateContent — it hits the same
+    per-model access check (a restricted/deprecated model 404s there too) but
+    does no generation, so it's cheaper, faster, and not subject to
+    generation-quota rate limits, which matters when probing dozens of
+    candidates per click.
     """
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(
+        api_key=api_key, http_options=types.HttpOptions(timeout=PROBE_TIMEOUT_MS)
+    )
     candidates = sorted(
         {
             m.name.split("/")[-1]
@@ -101,10 +113,9 @@ def list_available_models(api_key: str) -> List[str]:
 
     def _is_usable(name: str) -> bool:
         try:
-            client.models.generate_content(
+            client.models.count_tokens(
                 model=name,
                 contents=[types.Content(role="user", parts=[types.Part(text="hi")])],
-                config=types.GenerateContentConfig(max_output_tokens=1),
             )
             return True
         except genai_errors.ClientError as e:
@@ -113,9 +124,11 @@ def list_available_models(api_key: str) -> List[str]:
             # now — don't punish it for that.
             return e.code not in (403, 404)
         except Exception:
+            # Timeout or other transient failure — inconclusive, not a
+            # confirmed denial, so don't drop a model over it.
             return True
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         usable = list(pool.map(_is_usable, candidates))
 
     return [name for name, ok in zip(candidates, usable) if ok]
