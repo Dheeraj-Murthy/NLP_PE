@@ -51,12 +51,21 @@ class GeminiBackend(LLMBackend):
             )
         )
 
+        # rag_pipeline's configured max_new_tokens (512 by default) is sized
+        # for local Qwen inference, where bigger generations cost real VRAM.
+        # "Thinking" Gemini models (e.g. the gemini-3-* family) spend part of
+        # that same max_output_tokens budget on an internal reasoning pass
+        # before the visible answer, so a 512-token cap can get eaten by
+        # thinking and cut the answer off mid-sentence. Cloud API calls have
+        # no VRAM constraint, so just floor the budget high enough to leave
+        # room for both.
+        requested_tokens = max_new_tokens or self.max_new_tokens
         resp = self.client.models.generate_content(
             model=self._model_id,
             contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
-                max_output_tokens=max_new_tokens or self.max_new_tokens,
+                max_output_tokens=max(requested_tokens, 2048),
             ),
         )
 
@@ -83,30 +92,43 @@ class GeminiBackend(LLMBackend):
 PROBE_TIMEOUT_MS = 10_000  # per-call cap — the SDK's default is no timeout at
 # all (an unreachable/hanging model would block its worker thread forever)
 
+# Catalog entries that are "gemini-"-prefixed and generateContent-capable but
+# are not plain text chat models — TTS/image-output/agentic-control variants
+# that either can't serve our text RAG answers at all, or reject our call
+# shape outright (e.g. TTS models 400 with "Multiturn chat is not enabled").
+# Filtered by name first (cheaper, catches cases the live probe below can't
+# always distinguish from a transient error) as well as by the probe itself.
+UNSUITABLE_NAME_MARKERS = (
+    "-tts", "-image", "computer-use", "embedding", "-aqa", "-live", "-audio",
+)
+
 
 def list_available_models(api_key: str) -> List[str]:
-    """Models this key can actually use. Raises google.genai.errors.ClientError
-    (e.g. API_KEY_INVALID) if the key itself is bad.
+    """Models this key can actually use for a plain multi-turn text chat
+    call — i.e. what GeminiBackend.generate() actually sends. Raises
+    google.genai.errors.ClientError (e.g. API_KEY_INVALID) if the key itself
+    is bad.
 
-    ListModels is a static catalog, not a per-key access list — it still lists
-    models like gemini-2.5-pro as generateContent-capable even when a given
-    key gets "this model is no longer available to new users" on the real
-    call. So each catalog candidate is live-probed; only models that don't
-    403/404 for this specific key are kept.
+    ListModels is a static catalog, not a per-key/per-call-shape access list:
+    - It still lists models like gemini-2.5-pro as generateContent-capable
+      even when a given key gets "this model is no longer available to new
+      users" on the real call (403/404).
+    - It doesn't reflect per-model free-tier quota — some models (e.g.
+      computer-use-preview, flash-image) report a 429 with an explicit
+      "limit: 0" for the free tier, meaning they're not just rate-limited,
+      they're categorically unusable on this plan.
+    - It doesn't reflect call-shape support — TTS models 400 with "Multiturn
+      chat is not enabled" because they're not conversational text models,
+      regardless of key/quota.
+    - It also isn't scoped to the "Gemini" product line — a key with broad
+      access sees generateContent-capable entries from other Google model
+      families sharing the same endpoint (e.g. deep-research-*,
+      antigravity-*). rag_pipeline._resolve_backend only routes ids starting
+      with "gemini-", so those are excluded by prefix below.
 
-    The catalog also isn't scoped to the "Gemini" product line — a key with
-    broad access sees generateContent-capable entries from other Google model
-    families sharing the same endpoint (e.g. deep-research-*, antigravity-*).
-    Those aren't routable: rag_pipeline._resolve_backend dispatches purely on
-    an id starting with "gemini-" and raises "Unknown model" for anything
-    else, so a key that could technically reach them would still fail here
-    with an unrelated-looking error. Only "gemini-"-prefixed ids are kept.
-
-    The probe uses countTokens rather than generateContent — it hits the same
-    per-model access check (a restricted/deprecated model 404s there too) but
-    does no generation, so it's cheaper, faster, and not subject to
-    generation-quota rate limits, which matters when probing dozens of
-    candidates per click.
+    So each surviving candidate is live-probed with the real call shape
+    (generate_content, 1 output token) rather than the cheaper countTokens,
+    since only that call hits the free-tier-quota and call-shape checks above.
     """
     client = genai.Client(
         api_key=api_key, http_options=types.HttpOptions(timeout=PROBE_TIMEOUT_MS)
@@ -118,21 +140,30 @@ def list_available_models(api_key: str) -> List[str]:
             if m.name
             and m.name.split("/")[-1].startswith("gemini-")
             and "generateContent" in (m.supported_actions or [])
+            and not any(
+                marker in m.name.split("/")[-1] for marker in UNSUITABLE_NAME_MARKERS
+            )
         }
     )
 
     def _is_usable(name: str) -> bool:
         try:
-            client.models.count_tokens(
+            client.models.generate_content(
                 model=name,
                 contents=[types.Content(role="user", parts=[types.Part(text="hi")])],
+                config=types.GenerateContentConfig(max_output_tokens=1),
             )
             return True
         except genai_errors.ClientError as e:
-            # 403/404 = this key genuinely can't use the model. Anything else
-            # (e.g. 429 rate limit) means it's reachable, just throttled right
-            # now — don't punish it for that.
-            return e.code not in (403, 404)
+            if e.code in (403, 404):
+                return False  # key genuinely can't use this model
+            if e.code == 400:
+                return False  # model rejects this call shape (e.g. TTS-only)
+            if e.code == 429 and "limit: 0" in (e.message or ""):
+                return False  # zero free-tier quota — not just throttled
+            # Anything else (e.g. a 429 that's just transient throttling with
+            # a nonzero limit) means it's reachable — don't punish that.
+            return True
         except Exception:
             # Timeout or other transient failure — inconclusive, not a
             # confirmed denial, so don't drop a model over it.

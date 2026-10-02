@@ -47,6 +47,11 @@ for turn in st.session_state.chat_history:
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
         if turn["role"] == "assistant":
+            if turn.get("model_id"):
+                st.caption(
+                    f":material/smart_toy: {turn['model_id']}"
+                    + (f" ({turn['model_version']})" if turn.get("model_version") else "")
+                )
             if turn.get("confidence") is not None:
                 confidence_badge(turn["confidence"])
             render_sectioned_sources_and_citations(turn)
@@ -91,6 +96,14 @@ if user_input:
         if data is not None and data.get("error"):
             st.error(data["error"], icon=":material/error:")
         elif data is not None:
+            model_id = data.get("metrics", {}).get("model_id")
+            model_version = data.get("metrics", {}).get("model_version")
+            if model_id:
+                st.caption(
+                    f":material/smart_toy: {model_id}"
+                    + (f" ({model_version})" if model_version else "")
+                )
+
             if not data.get("answer_found", True):
                 st.warning(data["answer"], icon=":material/search_off:")
             else:
@@ -114,5 +127,7 @@ if user_input:
                     "sources_by_type": data.get("sources_by_type"),
                     "confidence": confidence,
                     "debug": data.get("debug"),
+                    "model_id": model_id,
+                    "model_version": model_version,
                 }
             )
