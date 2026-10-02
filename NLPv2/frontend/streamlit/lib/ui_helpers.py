@@ -68,30 +68,52 @@ def render_model_selector(key_prefix: str) -> Tuple[Optional[str], bool, Optiona
 def _render_gemini_model_picker(
     key_prefix: str, api_key: Optional[str], default_model: str
 ) -> Optional[str]:
-    """Test button validates the key against Gemini's ListModels API and, on
-    success, shows a dropdown of only the models that key can actually call
-    generateContent on. No hardcoded fallback — Google deprecates/renames
-    model ids over time (e.g. gemini-2.5-pro 404ing for new keys), so a
-    stale pinned default would silently route to a dead model instead of
-    one this key can really use. Returns None (blocking send) until a real,
-    tested model is chosen."""
+    """Validates the key against Gemini's ListModels API and, on success, shows
+    a dropdown of only the models that key can actually use. No hardcoded
+    fallback — Google deprecates/renames model ids over time (e.g.
+    gemini-2.5-pro 404ing for new keys), so a stale pinned default would
+    silently route to a dead model instead of one this key can really use.
+    Returns None (blocking send) until a real, tested model is chosen.
+
+    Testing triggers two ways that both run the exact same code path: clicking
+    "Test API key", or just pressing Enter after typing the key (committing a
+    new value reruns the script with it, which this treats as equivalent to a
+    click — no separate click needed after typing). The spinner replaces the
+    button itself (via the shared placeholder) rather than appearing as a
+    separate element, so there's one visual element, not two."""
     models_state_key = f"{key_prefix}_gemini_models"
     tested_key_state = f"{key_prefix}_gemini_tested_key"
+    last_seen_key_state = f"{key_prefix}_gemini_key_seen"
+    error_state_key = f"{key_prefix}_gemini_test_error"
 
     # Key changed since last successful test — stale model list no longer applies.
     if st.session_state.get(tested_key_state) != api_key:
         st.session_state[models_state_key] = None
 
-    if st.button(
+    previous_key = st.session_state.get(last_seen_key_state)
+    key_just_committed = bool(api_key) and api_key != previous_key
+    st.session_state[last_seen_key_state] = api_key
+
+    button_slot = st.empty()
+    clicked = button_slot.button(
         "Test API key", key=f"{key_prefix}_test_gemini_key", disabled=not api_key
-    ):
-        with st.spinner("Testing key — probing which models it can access..."):
-            try:
-                st.session_state[models_state_key] = api_client.gemini_models(api_key)
-                st.session_state[tested_key_state] = api_key
-            except Exception as e:
-                st.session_state[models_state_key] = None
-                render_api_error(e)
+    )
+
+    if clicked or key_just_committed:
+        with button_slot:
+            with st.spinner("Testing..."):
+                try:
+                    st.session_state[models_state_key] = api_client.gemini_models(api_key)
+                    st.session_state[tested_key_state] = api_key
+                    st.session_state[error_state_key] = None
+                except Exception as e:
+                    st.session_state[models_state_key] = None
+                    st.session_state[error_state_key] = e
+        st.rerun()
+
+    error = st.session_state.get(error_state_key)
+    if error is not None:
+        render_api_error(error)
 
     available_models = st.session_state.get(models_state_key)
     if available_models:
@@ -117,8 +139,8 @@ def _render_gemini_model_picker(
             "This key has no models available that support generateContent.",
             icon=":material/block:",
         )
-    else:
-        st.caption("Test your API key to pick from the models it can actually access.")
+    elif error is None:
+        st.caption("Type your API key and press Enter to see the models it can access.")
     return None
 
 
