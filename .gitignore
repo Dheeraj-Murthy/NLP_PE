@@ -154,6 +154,10 @@ uploads/
 data/**
 storage/
 
+# run.sh runtime state (pidfiles, logs)
+.run/
+logs/
+
 # =========================
 # Misc
 # =========================
