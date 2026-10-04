@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS statutes (
     year INT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+-- Original PDF, relative to the repository root (see backend/documents.py).
+ALTER TABLE statutes ADD COLUMN IF NOT EXISTS source_file TEXT;
 
 -- One chunk per article (Constitution) or section (BNS)
 CREATE TABLE IF NOT EXISTS statute_sections (

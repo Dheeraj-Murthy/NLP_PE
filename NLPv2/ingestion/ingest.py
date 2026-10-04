@@ -18,6 +18,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 import tracking
 from graph.citation_resolver import extract_citation_header, parse_reporter_citations
+from documents import ensure_source_columns, relative_source_path
 
 # Initialize local embedding model
 try:
@@ -447,8 +448,9 @@ def ingest_judgment_from_pdf(pdf_path: str, conn) -> Dict[str, Any]:
         cur.execute(
             """
             INSERT INTO judgments
-                (petitioner, respondent, court, date_of_judgment, bench, citations, judgment_text)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (petitioner, respondent, court, date_of_judgment, bench, citations, judgment_text,
+                 source_file)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -459,6 +461,8 @@ def ingest_judgment_from_pdf(pdf_path: str, conn) -> Dict[str, Any]:
                 metadata['bench'],
                 json.dumps(metadata['citations']),
                 text,           # <-- clean text
+                # Where the original PDF lives, so citations can link to it.
+                relative_source_path(pdf_path),
             )
         )
 
@@ -562,6 +566,7 @@ def main():
         user=os.environ.get("DB_USER", "postgres"),
         password=os.environ.get("DB_PASSWORD", "postgres"),
     )
+    ensure_source_columns(conn)
     start_time = time.time()
     try:
         successful = 0

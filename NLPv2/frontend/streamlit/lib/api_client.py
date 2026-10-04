@@ -283,6 +283,28 @@ def graph_neighbors(
     return _handle_response(resp)["data"]
 
 
+def document(doc_type: str, doc_id: int) -> Dict[str, Any]:
+    """doc_type "judgment" (doc_id = judgment ID) or "statute" (doc_id = statute section ID)."""
+    path = f"/documents/judgment/{doc_id}" if doc_type == "judgment" else f"/documents/statute-section/{doc_id}"
+    try:
+        resp = requests.get(_url(path), timeout=DEFAULT_TIMEOUT)
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    return _handle_response(resp)["data"]
+
+
+def document_pdf(doc_type: str, doc_id: int) -> bytes:
+    """Original PDF bytes: doc_id = judgment ID, or statute ID for statutes."""
+    path = f"/documents/judgment/{doc_id}/pdf" if doc_type == "judgment" else f"/documents/statute/{doc_id}/pdf"
+    try:
+        resp = requests.get(_url(path), timeout=DOCUMENT_TIMEOUT)
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    if resp.status_code != 200:
+        _handle_response(resp)
+    return resp.content
+
+
 def chat_export(session_id: str, fmt: str = "json") -> Any:
     """fmt "json": the portable export dict (re-importable); "markdown": transcript text."""
     try:

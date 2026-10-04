@@ -1,7 +1,7 @@
 import streamlit as st
 
 from lib import api_client
-from lib.ui_helpers import render_api_error
+from lib.ui_helpers import linked_label, render_api_error
 
 
 # Graphviz lays the graph out in the browser, and edge labels are by far the
@@ -194,6 +194,8 @@ with tab_neighbors:
             st.session_state["graph_focus"] = trail[-1][0]
             st.session_state["cites_offset"] = st.session_state["cited_by_offset"] = 0
             st.rerun()
+
+    st.markdown(linked_label(f"Open judgment #{int(center_id)}", {"judgment_id": int(center_id)}))
 
     col_cites, col_cited_by = st.columns(2)
     for col, direction, title in (

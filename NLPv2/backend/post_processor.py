@@ -13,6 +13,13 @@ class RAGResponse:
     answer_length: int
     citations_by_type: Dict[str, List[str]] = field(default_factory=dict)
     sources_by_type: Dict[str, List[str]] = field(default_factory=dict)
+    # Same entries as citations / sources (same order), as structured
+    # references the frontend can link to the original document:
+    # {"label", "doc_type", "judgment_id", "section_id"}.
+    citation_refs: List[Dict[str, Any]] = field(default_factory=list)
+    source_refs: List[Dict[str, Any]] = field(default_factory=list)
+    citation_refs_by_type: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    source_refs_by_type: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
 class PostProcessor:
 
@@ -41,20 +48,24 @@ class PostProcessor:
         is_answer_found = self._check_answer_exists(cleaned_answer)
         confidence_score = self._calculate_confidence(cleaned_answer, retrieved_chunks)
 
-        citations = self._extract_citations(cleaned_answer, retrieved_chunks)
-        sources = self._get_unique_sources(retrieved_chunks)
+        citation_refs = self._extract_citation_refs(cleaned_answer, retrieved_chunks)
+        source_refs = self._get_unique_source_refs(retrieved_chunks)
+        citations = [r["label"] for r in citation_refs]
+        sources = [r["label"] for r in source_refs]
 
         statute_chunks = [c for c in retrieved_chunks if c.get("doc_type") == "statute"]
         judgment_chunks = [c for c in retrieved_chunks if c.get("doc_type", "judgment") != "statute"]
 
-        citations_by_type = {
-            "statute": self._extract_citations(cleaned_answer, retrieved_chunks, doc_type_filter="statute"),
-            "judgment": self._extract_citations(cleaned_answer, retrieved_chunks, doc_type_filter="judgment"),
+        citation_refs_by_type = {
+            "statute": self._extract_citation_refs(cleaned_answer, retrieved_chunks, doc_type_filter="statute"),
+            "judgment": self._extract_citation_refs(cleaned_answer, retrieved_chunks, doc_type_filter="judgment"),
         }
-        sources_by_type = {
-            "statute": self._get_unique_sources(statute_chunks),
-            "judgment": self._get_unique_sources(judgment_chunks),
+        source_refs_by_type = {
+            "statute": self._get_unique_source_refs(statute_chunks),
+            "judgment": self._get_unique_source_refs(judgment_chunks),
         }
+        citations_by_type = {k: [r["label"] for r in v] for k, v in citation_refs_by_type.items()}
+        sources_by_type = {k: [r["label"] for r in v] for k, v in source_refs_by_type.items()}
 
         return RAGResponse(
                 answer=cleaned_answer,
@@ -66,6 +77,10 @@ class PostProcessor:
                 answer_length=len(cleaned_answer),
                 citations_by_type=citations_by_type,
                 sources_by_type=sources_by_type,
+                citation_refs=citation_refs,
+                source_refs=source_refs,
+                citation_refs_by_type=citation_refs_by_type,
+                source_refs_by_type=source_refs_by_type,
                 )
 
     def _clean_response(self, raw_response: str) -> str:
@@ -175,12 +190,36 @@ class PostProcessor:
             return self._format_statute_ref(chunk)
         return f"{chunk['case']} ({chunk['year']})"
 
+    def _document_ref(self, chunk: Dict[str, Any], label: str) -> Dict[str, Any]:
+        """Where a citation's original document lives: a judgment ID, or a
+        statute section ID (statute chunks are keyed by section_id). Both
+        None for text with no stored document, e.g. an uploaded file."""
+        is_statute = chunk.get("doc_type", "judgment") == "statute"
+        return {
+            "label": label,
+            "doc_type": "statute" if is_statute else "judgment",
+            "judgment_id": None if is_statute else chunk.get("judgment_id"),
+            "section_id": chunk.get("chunk_id") if is_statute else None,
+        }
+
     def _extract_citations(
             self,
             answer: str,
             retrieved_chunks: List[Dict[str, Any]],
             doc_type_filter: Optional[str] = None,
             ) -> List[str]:
+        return [
+            r["label"]
+            for r in self._extract_citation_refs(answer, retrieved_chunks, doc_type_filter)
+        ]
+
+    def _extract_citation_refs(
+            self,
+            answer: str,
+            retrieved_chunks: List[Dict[str, Any]],
+            doc_type_filter: Optional[str] = None,
+            ) -> List[Dict[str, Any]]:
+        refs: List[Dict[str, Any]] = []
         citations = []
 
         bracket_pattern = r'\[(\d+)\]'
@@ -194,6 +233,7 @@ class PostProcessor:
                 citation = self._format_citation(chunk)
                 if citation not in citations:
                     citations.append(citation)
+                    refs.append(self._document_ref(chunk, citation))
 
         para_pattern = r'¶(\d+)'
         para_matches = re.findall(para_pattern, answer)
@@ -205,21 +245,25 @@ class PostProcessor:
                     citation = self._format_citation(chunk)
                     if citation not in citations:
                         citations.append(citation)
+                        refs.append(self._document_ref(chunk, citation))
                     break
 
-        return citations
+        return refs
 
     def _get_unique_sources(self, retrieved_chunks: List[Dict[str, Any]]) -> List[str]:
-        sources = []
+        return [r["label"] for r in self._get_unique_source_refs(retrieved_chunks)]
+
+    def _get_unique_source_refs(self, retrieved_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        refs = []
         seen = set()
 
         for chunk in retrieved_chunks:
             key = self._source_key(chunk)
             if key not in seen:
-                sources.append(self._format_source(chunk))
+                refs.append(self._document_ref(chunk, self._format_source(chunk)))
                 seen.add(key)
 
-        return sources
+        return refs
 
     def format_response_with_citations(
             self, 

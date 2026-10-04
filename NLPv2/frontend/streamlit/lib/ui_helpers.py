@@ -160,32 +160,62 @@ def _render_live_model_picker(
     return None
 
 
-def render_citations(citations: List[str]) -> None:
+def document_url(ref: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Link to the Document page for a citation reference from the API
+    ({"doc_type", "judgment_id", "section_id"}), or None if it has no stored
+    document. Relative, so it works wherever the app is mounted."""
+    if not ref:
+        return None
+    if ref.get("doc_type") == "statute" and ref.get("section_id"):
+        return f"Document?type=statute&id={ref['section_id']}"
+    if ref.get("judgment_id"):
+        return f"Document?type=judgment&id={ref['judgment_id']}"
+    return None
+
+
+def linked_label(label: str, ref: Optional[Dict[str, Any]]) -> str:
+    """Markdown for a citation: a link to its document when there is one."""
+    url = document_url(ref)
+    if not url:
+        return label
+    return f"[{label.replace('[', '(').replace(']', ')')}]({url})"
+
+
+def _bullets(items: List[str], refs: Optional[List[Dict[str, Any]]]) -> None:
+    by_label = {r.get("label"): r for r in refs or []}
+    for item in items:
+        st.markdown(f"- {linked_label(item, by_label.get(item))}")
+
+
+def render_citations(citations: List[str], refs: Optional[List[Dict[str, Any]]] = None) -> None:
     if not citations:
         return
     with st.expander(f"Citations ({len(citations)})", icon=":material/gavel:"):
-        for c in citations:
-            st.markdown(f"- {c}")
+        _bullets(citations, refs)
 
 
-def render_sources(sources: List[str]) -> None:
+def render_sources(sources: List[str], refs: Optional[List[Dict[str, Any]]] = None) -> None:
     if not sources:
         return
     with st.expander(f"Sources ({len(sources)})", icon=":material/menu_book:"):
-        for s in sources:
-            st.markdown(f"- {s}")
+        _bullets(sources, refs)
 
 
-def _render_type_expander(title: str, icon: str, citations: List[str], sources: List[str]) -> None:
+def _render_type_expander(
+    title: str,
+    icon: str,
+    citations: List[str],
+    sources: List[str],
+    citation_refs: Optional[List[Dict[str, Any]]] = None,
+    source_refs: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     with st.expander(f"{title} ({len(citations) or len(sources)})", icon=icon):
         if citations:
             st.markdown("**Citations**")
-            for c in citations:
-                st.markdown(f"- {c}")
+            _bullets(citations, citation_refs)
         if sources:
             st.markdown("**Sources**")
-            for s in sources:
-                st.markdown(f"- {s}")
+            _bullets(sources, source_refs)
 
 
 def render_sectioned_sources_and_citations(data: Dict[str, Any]) -> None:
@@ -197,9 +227,13 @@ def render_sectioned_sources_and_citations(data: Dict[str, Any]) -> None:
     sources_by_type = data.get("sources_by_type")
 
     if not citations_by_type and not sources_by_type:
-        render_citations(data.get("citations", []))
-        render_sources(data.get("sources", []))
+        render_citations(data.get("citations", []), data.get("citation_refs"))
+        render_sources(data.get("sources", []), data.get("source_refs"))
         return
+
+    # Structured references (for document links); absent in older responses.
+    citation_refs = data.get("citation_refs_by_type") or {}
+    source_refs = data.get("source_refs_by_type") or {}
 
     statute_citations = (citations_by_type or {}).get("statute", [])
     statute_sources = (sources_by_type or {}).get("statute", [])
@@ -208,11 +242,13 @@ def render_sectioned_sources_and_citations(data: Dict[str, Any]) -> None:
 
     if statute_citations or statute_sources:
         _render_type_expander(
-            "Statutes & Articles", ":material/balance:", statute_citations, statute_sources
+            "Statutes & Articles", ":material/balance:", statute_citations, statute_sources,
+            citation_refs.get("statute"), source_refs.get("statute"),
         )
     if judgment_citations or judgment_sources:
         _render_type_expander(
-            "Case Law", ":material/gavel:", judgment_citations, judgment_sources
+            "Case Law", ":material/gavel:", judgment_citations, judgment_sources,
+            citation_refs.get("judgment"), source_refs.get("judgment"),
         )
 
 
@@ -259,15 +295,15 @@ def render_precedent_chains(chains: List[Dict[str, Any]]) -> None:
     for chain in chains:
         label = chain.get("label", f"Case #{chain.get('judgment_id')}")
         with st.container(border=True):
-            st.markdown(f"**{label}**")
+            st.markdown(f"**{linked_label(label, {'judgment_id': chain.get('judgment_id')})}**")
             st.caption(
                 f"Cites {chain.get('cites_count', 0)} cases · "
                 f"cited by {chain.get('cited_by_count', 0)} later judgments"
             )
             for c in chain.get("cites", []):
-                st.markdown(f"→ cites: {c['label']} `{c['relationship']}`")
+                st.markdown(f"→ cites: {linked_label(c['label'], c)} `{c['relationship']}`")
             for c in chain.get("cited_by", []):
-                st.markdown(f"← cited by: {c['label']} `{c['relationship']}`")
+                st.markdown(f"← cited by: {linked_label(c['label'], c)} `{c['relationship']}`")
 
 
 def render_api_error(exc: Exception) -> None:

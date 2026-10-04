@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS judgments (
     judgment_text TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+-- Original PDF, relative to the repository root (see backend/documents.py).
+ALTER TABLE judgments ADD COLUMN IF NOT EXISTS source_file TEXT;
 
 -- Judgment chunks table
 CREATE TABLE IF NOT EXISTS judgment_chunks (

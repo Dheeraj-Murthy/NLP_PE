@@ -55,6 +55,16 @@ class RAGMetrics:
     answer_found: bool
 
 
+def _document_refs(processed) -> Dict[str, Any]:
+    """Structured twins of citations / sources, for linking to documents."""
+    return {
+        "citation_refs": processed.citation_refs,
+        "source_refs": processed.source_refs,
+        "citation_refs_by_type": processed.citation_refs_by_type,
+        "source_refs_by_type": processed.source_refs_by_type,
+    }
+
+
 @dataclass
 class ChatMessage:
     role: str
@@ -62,6 +72,7 @@ class ChatMessage:
     timestamp: datetime = field(default_factory=datetime.now)
     citations: List[str] = field(default_factory=list)
     confidence: float = 0.0
+    citation_refs: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class ChatSession:
@@ -73,7 +84,11 @@ class ChatSession:
         self.messages.append(ChatMessage(role="user", content=content))
 
     def add_assistant_message(
-        self, content: str, citations: List[str], confidence: float
+        self,
+        content: str,
+        citations: List[str],
+        confidence: float,
+        citation_refs: Optional[List[Dict[str, Any]]] = None,
     ):
         self.messages.append(
             ChatMessage(
@@ -81,6 +96,7 @@ class ChatSession:
                 content=content,
                 citations=citations,
                 confidence=confidence,
+                citation_refs=citation_refs or [],
             )
         )
 
@@ -95,6 +111,7 @@ class ChatSession:
             if include_citations and msg.role == "assistant":
                 item["citations"] = msg.citations
                 item["confidence"] = msg.confidence
+                item["citation_refs"] = msg.citation_refs
             history.append(item)
         return history[-self.max_history :]
 
@@ -330,6 +347,7 @@ class LegalRAGPipeline:
                 "sources": processed.sources,
                 "citations_by_type": processed.citations_by_type,
                 "sources_by_type": processed.sources_by_type,
+                **_document_refs(processed),
                 "precedent_chains": precedent_chains,
                 "metrics": self._build_metrics(
                     gen, retrieval_time, generation_time, total_time,
@@ -558,6 +576,7 @@ class LegalRAGPipeline:
                 "sources": processed.sources,
                 "citations_by_type": processed.citations_by_type,
                 "sources_by_type": processed.sources_by_type,
+                **_document_refs(processed),
                 "document": document_info,
                 "metrics": self._build_metrics(
                     gen, retrieval_time, generation_time, total_time,
@@ -775,6 +794,7 @@ class LegalRAGPipeline:
                     "model_version": metrics.get("model_version"),
                     "cited_documents": cited_documents(gen.text, retrieved_chunks),
                     "context": context_info,
+                    **_document_refs(processed),
                 },
             )
 
@@ -786,6 +806,7 @@ class LegalRAGPipeline:
                 "sources": processed.sources,
                 "citations_by_type": processed.citations_by_type,
                 "sources_by_type": processed.sources_by_type,
+                **_document_refs(processed),
                 "session_id": session_id,
                 "conversation_history": history_for_display(),
                 "context": context_info,
