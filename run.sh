@@ -44,7 +44,6 @@ start() {
             nohup "$VENV_PY" api.py >> "$LOG_DIR/api.log" 2>&1 &
             echo $! > "$API_PID_FILE"
         )
-        disown
         sleep 1
         echo "API started (pid $(cat "$API_PID_FILE")), log: $LOG_DIR/api.log"
     fi
@@ -63,7 +62,6 @@ start() {
                 >> "$LOG_DIR/frontend.log" 2>&1 &
             echo $! > "$FRONTEND_PID_FILE"
         )
-        disown
         sleep 1
         echo "Frontend started (pid $(cat "$FRONTEND_PID_FILE")), log: $LOG_DIR/frontend.log"
     fi
