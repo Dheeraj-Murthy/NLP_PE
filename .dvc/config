@@ -1,0 +1,5 @@
+[core]
+    remote = origin
+['remote "origin"']
+    url = ssh://172.16.193.5/home/legalnlp/srv/dvc-storage
+    user = legalnlp
