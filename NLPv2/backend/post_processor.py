@@ -143,22 +143,36 @@ class PostProcessor:
 
         return confidence
 
+    def _statute_label(self, case: str) -> str:
+        """Constitution articles and BNS sections share the same raw
+        `section_number` field from ingestion (just digits, see
+        ingest_statutes.py's parse_constitution/parse_bns) — neither carries
+        its own "Article"/"Section" label, so it has to be inferred from the
+        statute's title here at citation-formatting time."""
+        return "Art." if "constitution" in case.lower() else "Section"
+
+    def _format_statute_ref(self, chunk: Dict[str, Any]) -> str:
+        section_number = chunk.get("section_number") or ""
+        if not section_number:
+            return chunk["case"]
+        return f"{chunk['case']}, {self._statute_label(chunk['case'])} {section_number}"
+
     def _format_citation(self, chunk: Dict[str, Any]) -> str:
-        doc_type = chunk.get("doc_type", "judgment")
-        if doc_type == "statute":
-            return f"{chunk['case']} {chunk.get('section_number') or chunk.get('para', '')}"
-        return f"{chunk['case']} ({chunk['court']}, {chunk['year']}, {chunk['para']})"
+        # Same format as _format_source — a citation used to also append the
+        # judgment chunk's internal DB id (chunk['para'], e.g. "(chunk 4521)"),
+        # which isn't a real paragraph number and isn't useful to a reader.
+        return self._format_source(chunk)
 
     def _format_source(self, chunk: Dict[str, Any]) -> str:
         doc_type = chunk.get("doc_type", "judgment")
         if doc_type == "statute":
-            return f"{chunk['case']} {chunk.get('section_number') or chunk.get('para', '')}"
+            return self._format_statute_ref(chunk)
         return f"{chunk['case']} ({chunk['court']}, {chunk['year']})"
 
     def _source_key(self, chunk: Dict[str, Any]) -> str:
         doc_type = chunk.get("doc_type", "judgment")
         if doc_type == "statute":
-            return f"{chunk['case']} {chunk.get('section_number') or chunk.get('para', '')}"
+            return self._format_statute_ref(chunk)
         return f"{chunk['case']} ({chunk['year']})"
 
     def _extract_citations(
