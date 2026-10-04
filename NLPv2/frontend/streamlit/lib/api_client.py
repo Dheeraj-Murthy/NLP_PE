@@ -95,12 +95,17 @@ def chat(
     model: Optional[str] = None,
     external_ok: bool = False,
     api_key: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """session_id: an existing conversation's ID, "new" to start one (the
+    response's session_id is its ID), or None for the shared default."""
     data = {"message": message, "include_debug": include_debug, "external_ok": external_ok}
     if model:
         data["model"] = model
     if api_key:
         data["api_key"] = api_key
+    if session_id:
+        data["session_id"] = session_id
     try:
         resp = requests.post(_url("/chat"), data=data, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException as e:
@@ -144,17 +149,19 @@ def openai_models(api_key: str) -> List[str]:
     return _handle_response(resp)["data"]["models"]
 
 
-def chat_clear() -> None:
+def chat_clear(session_id: Optional[str] = None) -> None:
+    data = {"session_id": session_id} if session_id else None
     try:
-        resp = requests.post(_url("/chat/clear"), timeout=DEFAULT_TIMEOUT)
+        resp = requests.post(_url("/chat/clear"), data=data, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException as e:
         raise LegalRAGAPIError(str(e)) from e
     _handle_response(resp)
 
 
-def chat_history() -> List[Dict[str, Any]]:
+def chat_history(session_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    params = {"session_id": session_id} if session_id else None
     try:
-        resp = requests.get(_url("/chat/history"), timeout=DEFAULT_TIMEOUT)
+        resp = requests.get(_url("/chat/history"), params=params, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException as e:
         raise LegalRAGAPIError(str(e)) from e
     return _handle_response(resp)["data"]
@@ -242,3 +249,48 @@ def graph_path(source_id: int, target_id: int) -> Optional[List[int]]:
     if not payload.get("success"):
         return None
     return payload["data"]["path"]
+
+
+def chat_export(session_id: str, fmt: str = "json") -> Any:
+    """fmt "json": the portable export dict (re-importable); "markdown": transcript text."""
+    try:
+        resp = requests.get(
+            _url("/chat/export"), params={"session_id": session_id, "format": fmt}, timeout=DEFAULT_TIMEOUT
+        )
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    if fmt == "markdown":
+        if resp.status_code != 200:
+            _handle_response(resp)
+        return resp.text
+    return _handle_response(resp)["data"]
+
+
+def chat_import(conversation: Dict[str, Any]) -> str:
+    """Start a new conversation from an exported one; returns its session ID."""
+    try:
+        resp = requests.post(_url("/chat/import"), json=conversation, timeout=DEFAULT_TIMEOUT)
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    return _handle_response(resp)["data"]["session_id"]
+
+
+def chat_sessions(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+    """Chats, most recent first: {"total", "items": [{session_id, title, last_active, ...}]}."""
+    try:
+        resp = requests.get(
+            _url("/chat/sessions"), params={"limit": limit, "offset": offset}, timeout=DEFAULT_TIMEOUT
+        )
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    return _handle_response(resp)["data"]
+
+
+def chat_rename(session_id: str, title: str) -> None:
+    try:
+        resp = requests.patch(
+            _url(f"/chat/sessions/{session_id}"), json={"title": title}, timeout=DEFAULT_TIMEOUT
+        )
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    _handle_response(resp)

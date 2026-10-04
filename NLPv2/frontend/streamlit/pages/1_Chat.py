@@ -1,3 +1,5 @@
+import json
+
 import streamlit as st
 
 from lib import api_client
@@ -9,25 +11,148 @@ from lib.ui_helpers import (
     render_sectioned_sources_and_citations,
 )
 
+def render_context_note(context) -> None:
+    """One line on what the model had to work with for this answer."""
+    if not context:
+        return
+    def plural(n: int, word: str) -> str:
+        return f"{n} {word}{'' if n == 1 else 's'}"
+
+    parts = [f"saw {plural(context.get('history_messages', 0), 'earlier message')}"]
+    if context.get("summarized_messages"):
+        parts.append(f"{plural(context['summarized_messages'], 'older message')} summarised to fit")
+    if context.get("carried_documents"):
+        parts.append(f"{plural(context['carried_documents'], 'document')} from earlier answers")
+    st.caption(":material/history: Context: " + " · ".join(parts))
+
+
 st.set_page_config(page_title="Chat — Legal RAG", page_icon=":material/chat:", layout="wide")
 init_session_state()
 
 st.title("Chat", icon=":material/chat:")
 st.caption(
-    "This deployment keeps a single shared conversation session across every user — "
-    "not per-browser or per-user. Treat it as a single-user/demo chat.",
+    "Each conversation keeps its own history, and every answer uses the whole conversation as "
+    "context — you can switch models at any point and the new model picks it up. Very long chats "
+    "are summarised to fit the model. Your chats are listed in the sidebar — there are no "
+    "accounts yet, so everyone using this app sees the same list.",
+)
+
+# The conversation's ID lives in the URL (?chat=...), so a refresh or a
+# shared link reopens it. No ID yet means a fresh conversation; the server
+# assigns one with the first answer.
+chat_id = st.query_params.get("chat")
+if st.session_state.get("chat_loaded") != chat_id:
+    st.session_state.chat_history = []
+    if chat_id:
+        try:
+            for msg in api_client.chat_history(chat_id):
+                turn = {k: v for k, v in msg.items() if k != "timestamp"}
+                st.session_state.chat_history.append(turn)
+        except Exception as e:
+            render_api_error(e)
+    st.session_state.chat_loaded = chat_id
+
+
+def _start_new_chat() -> None:
+    st.query_params.pop("chat", None)
+    st.session_state.chat_history = []
+    st.session_state.chat_loaded = None
+
+
+CHATS_PAGE = 20
+st.session_state.setdefault("chats_shown", CHATS_PAGE)
+
+
+def _open_chat(session_id: str) -> None:
+    st.query_params["chat"] = session_id
+
+
+try:
+    chats = api_client.chat_sessions(limit=st.session_state.chats_shown)
+except Exception as e:
+    chats = None
+    chats_error = e
+current_title = next(
+    (c["title"] for c in (chats or {}).get("items", []) if c["session_id"] == chat_id), None
 )
 
 with st.sidebar:
     model, external_ok, api_key, is_external = render_model_selector("chat")
     include_debug = st.toggle("Include debug info", value=False)
-    if st.button("Clear chat", icon=":material/delete_sweep:", width="stretch"):
-        try:
-            api_client.chat_clear()
-            st.session_state.chat_history = []
-            st.rerun()
-        except Exception as e:
-            render_api_error(e)
+
+    if st.button("New chat", icon=":material/add_comment:", width="stretch", type="primary"):
+        _start_new_chat()
+        st.rerun()
+
+    st.subheader("Chats")
+    if chats is None:
+        render_api_error(chats_error)
+    elif not chats["items"]:
+        st.caption("No chats yet — ask a question to start one.")
+    else:
+        for c in chats["items"]:
+            st.button(
+                c["title"],
+                key=f"open_chat_{c['session_id']}",
+                on_click=_open_chat,
+                args=(c["session_id"],),
+                width="stretch",
+                type="secondary" if c["session_id"] == chat_id else "tertiary",
+                icon=":material/chat_bubble:" if c["session_id"] == chat_id else None,
+            )
+        if chats["total"] > len(chats["items"]):
+            if st.button(f"Show more ({chats['total'] - len(chats['items'])})", width="stretch"):
+                st.session_state.chats_shown += CHATS_PAGE
+                st.rerun()
+
+    if chat_id:
+        with st.expander("This chat", icon=":material/tune:"):
+            new_title = st.text_input("Title", value=current_title or "", key=f"title_{chat_id}")
+            if st.button("Rename", width="stretch", disabled=not new_title.strip() or new_title == current_title):
+                try:
+                    api_client.chat_rename(chat_id, new_title)
+                    st.rerun()
+                except Exception as e:
+                    render_api_error(e)
+            if st.button("Delete this chat", icon=":material/delete_sweep:", width="stretch"):
+                try:
+                    api_client.chat_clear(chat_id)
+                    _start_new_chat()
+                    st.rerun()
+                except Exception as e:
+                    render_api_error(e)
+
+    with st.expander("Export / import", icon=":material/import_export:"):
+        if chat_id:
+            st.caption("JSON keeps everything needed to continue the chat later or elsewhere.")
+            if st.button("Prepare export", width="stretch"):
+                try:
+                    st.session_state.chat_export = {
+                        "id": chat_id,
+                        "json": json.dumps(api_client.chat_export(chat_id), indent=2),
+                        "markdown": api_client.chat_export(chat_id, fmt="markdown"),
+                    }
+                except Exception as e:
+                    render_api_error(e)
+            prepared = st.session_state.get("chat_export")
+            if prepared and prepared["id"] == chat_id:
+                st.download_button("Download JSON", prepared["json"], file_name=f"chat-{chat_id[:8]}.json",
+                                   mime="application/json", width="stretch")
+                st.download_button("Download Markdown", prepared["markdown"], file_name=f"chat-{chat_id[:8]}.md",
+                                   mime="text/markdown", width="stretch")
+        uploaded = st.file_uploader("Continue an exported chat", type=["json"], key="chat_import_file")
+        if uploaded is not None and st.button("Import", width="stretch"):
+            try:
+                new_id = api_client.chat_import(json.loads(uploaded.getvalue()))
+                st.query_params["chat"] = new_id
+                st.rerun()
+            except json.JSONDecodeError:
+                st.error("That file isn't valid JSON.", icon=":material/error:")
+            except Exception as e:
+                render_api_error(e)
+
+if current_title:
+    st.subheader(current_title)
 
 if not st.session_state.chat_history:
     selected = st.pills(
@@ -54,6 +179,7 @@ for turn in st.session_state.chat_history:
                 )
             if turn.get("confidence") is not None:
                 confidence_badge(turn["confidence"])
+            render_context_note(turn.get("context"))
             render_sectioned_sources_and_citations(turn)
             if turn.get("debug"):
                 with st.expander("Debug info", icon=":material/bug_report:"):
@@ -78,12 +204,19 @@ if user_input:
             )
             data = None
         else:
+            started_new_chat = False
             with st.status(":shimmer[Retrieving and generating]", type="compact") as status:
                 try:
                     data = api_client.chat(
                         user_input, include_debug=include_debug,
                         model=model, external_ok=external_ok, api_key=api_key,
+                        session_id=chat_id or "new",
                     )
+                    new_id = data.get("session_id")
+                    started_new_chat = bool(not chat_id and new_id and new_id != "default")
+                    if started_new_chat:
+                        st.query_params["chat"] = new_id
+                        st.session_state.chat_loaded = new_id
                     status.update(
                         label="Failed" if data.get("error") else "Done",
                         state="error" if data.get("error") else "complete",
@@ -112,6 +245,7 @@ if user_input:
             confidence = data.get("confidence")
             if confidence is not None:
                 confidence_badge(confidence)
+            render_context_note(data.get("context"))
             render_sectioned_sources_and_citations(data)
             if data.get("debug"):
                 with st.expander("Debug info", icon=":material/bug_report:"):
@@ -126,8 +260,12 @@ if user_input:
                     "citations_by_type": data.get("citations_by_type"),
                     "sources_by_type": data.get("sources_by_type"),
                     "confidence": confidence,
+                    "context": data.get("context"),
                     "debug": data.get("debug"),
                     "model_id": model_id,
                     "model_version": model_version,
                 }
             )
+            # A chat that just started isn't in the sidebar list drawn above yet.
+            if started_new_chat:
+                st.rerun()
