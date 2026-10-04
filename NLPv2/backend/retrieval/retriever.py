@@ -481,7 +481,12 @@ class LegalRetriever:
 
         centrality_map = {}
         if graph_boost > 0.0 and self.graph_manager:
-            centrality_map = self.graph_manager.get_centrality_scores()
+            if hasattr(self.graph_manager, "centrality_for"):
+                centrality_map = self.graph_manager.centrality_for(
+                    [c.get("judgment_id") for c in fused.values()]
+                )
+            else:
+                centrality_map = self.graph_manager.get_centrality_scores()
 
         for key, score in rrf_scores.items():
             j_id = fused[key].get("judgment_id")

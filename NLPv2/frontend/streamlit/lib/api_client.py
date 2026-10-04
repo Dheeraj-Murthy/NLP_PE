@@ -251,6 +251,38 @@ def graph_path(source_id: int, target_id: int) -> Optional[List[int]]:
     return payload["data"]["path"]
 
 
+def graph_search(q: str, limit: int = 10) -> List[Dict[str, Any]]:
+    try:
+        resp = requests.get(
+            _url("/graph/search"), params={"q": q, "limit": limit}, timeout=DEFAULT_TIMEOUT
+        )
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    return _handle_response(resp)["data"]
+
+
+def graph_neighbors(
+    judgment_id: int,
+    direction: str = "cites",
+    limit: int = 25,
+    offset: int = 0,
+    relationship: Optional[str] = None,
+) -> Dict[str, Any]:
+    """direction: "cites" (cases this judgment cites) or "cited-by"."""
+    params: Dict[str, Any] = {"limit": limit, "offset": offset}
+    if relationship:
+        params["relationship"] = relationship
+    try:
+        resp = requests.get(
+            _url(f"/graph/judgment/{judgment_id}/{direction}"),
+            params=params,
+            timeout=DEFAULT_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    return _handle_response(resp)["data"]
+
+
 def chat_export(session_id: str, fmt: str = "json") -> Any:
     """fmt "json": the portable export dict (re-importable); "markdown": transcript text."""
     try:

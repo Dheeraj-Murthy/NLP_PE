@@ -17,6 +17,7 @@ from tqdm import tqdm
 # to sys.path to reuse tracking.py's MLflow setup instead of duplicating it.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 import tracking
+from graph.citation_resolver import extract_citation_header, parse_reporter_citations
 
 # Initialize local embedding model
 try:
@@ -228,6 +229,16 @@ def parse_judgment_metadata(text: str, filename: str) -> Dict[str, Any]:
             metadata['date_of_judgment'] = date_obj.strftime('%Y-%m-%d')
         except Exception:
             pass
+
+    # The judgment's own reporter citations, from its JUDIS "CITATION:" header
+    # (e.g. "1953 AIR 75  1953 SCR 215"). Edge building reads the same header
+    # from the stored text, so this column is informational.
+    citation_header = extract_citation_header(text)
+    if citation_header:
+        metadata['citations'] = {
+            'header': citation_header,
+            'reporters': [c.raw for c in parse_reporter_citations(citation_header)],
+        }
 
     bench_pattern = r'BENCH:\s*\[?([^\]\n]+)'
     bench_match = re.search(bench_pattern, text)

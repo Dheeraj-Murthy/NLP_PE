@@ -1,6 +1,7 @@
 from fastapi import Body, FastAPI, HTTPException, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import tempfile
 import os
@@ -31,7 +32,8 @@ graph_manager: Optional[CitationGraphManager] = None
 async def startup_event():
     global pipeline, graph_manager
     pipeline = LegalRAGPipeline(load_llm=True)
-    graph_manager = CitationGraphManager()
+    # Share the pipeline's manager rather than building a second one.
+    graph_manager = getattr(pipeline, "graph_manager", None) or CitationGraphManager()
     graph_manager.load_graph_from_db()
 
 
@@ -348,6 +350,81 @@ async def get_precedent_path(source_id: int, target_id: int):
         if path is None:
             return {"success": False, "message": "No citation path found between cases"}
         return {"success": True, "data": {"path": path}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/graph/search")
+async def search_cases(
+    q: str = Query(..., min_length=1, max_length=300),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Find cases by judgment ID, reporter citation or case name."""
+    if not graph_manager:
+        raise HTTPException(status_code=500, detail="Graph manager not initialized")
+
+    try:
+        return {"success": True, "data": graph_manager.search(q, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _neighbors_response(judgment_id: int, direction: str, relationship, limit: int, offset: int):
+    if not graph_manager:
+        raise HTTPException(status_code=500, detail="Graph manager not initialized")
+
+    try:
+        page = graph_manager.get_neighbors(
+            judgment_id, direction=direction, relationship=relationship, limit=limit, offset=offset
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    if page is None:
+        raise HTTPException(status_code=404, detail=f"Judgment {judgment_id} not found")
+    return {"success": True, "data": page}
+
+
+@app.get("/graph/judgment/{judgment_id}/cites")
+async def get_cases_cited(
+    judgment_id: int,
+    relationship: Optional[str] = None,
+    limit: int = Query(25, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """Paged list of the cases this judgment cites, most important first."""
+    return _neighbors_response(judgment_id, "cites", relationship, limit, offset)
+
+
+@app.get("/graph/judgment/{judgment_id}/cited-by")
+async def get_citing_cases(
+    judgment_id: int,
+    relationship: Optional[str] = None,
+    limit: int = Query(25, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """Paged list of the cases that cite this judgment, most important first."""
+    return _neighbors_response(judgment_id, "cited_by", relationship, limit, offset)
+
+
+class ResolveRequest(BaseModel):
+    citations: List[str]
+
+
+MAX_RESOLVE_BATCH = 500
+
+
+@app.post("/graph/resolve")
+async def resolve_citations(body: ResolveRequest):
+    """Resolve citation strings to judgment IDs, the same way edge building does."""
+    if not graph_manager:
+        raise HTTPException(status_code=500, detail="Graph manager not initialized")
+    if not 1 <= len(body.citations) <= MAX_RESOLVE_BATCH:
+        raise HTTPException(
+            status_code=422, detail=f"Send between 1 and {MAX_RESOLVE_BATCH} citations"
+        )
+
+    try:
+        return {"success": True, "data": graph_manager.resolve_citations(body.citations)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

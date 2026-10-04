@@ -95,6 +95,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_citation_edges_unique
 SELECT 'Database initialized successfully!' as status;
 EOF
 
+# Citation graph tables (aliases, precomputed stats) — same file
+# build_citation_edges.py applies, so the two can't drift apart.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "Creating citation graph schema..."
+psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+	-f "$SCRIPT_DIR/../../backend/graph/schema.sql"
+psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+	-c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" \
+	-c "CREATE INDEX IF NOT EXISTS idx_judgment_aliases_trgm ON judgment_aliases USING GIN (alias_norm gin_trgm_ops);" ||
+	echo "Warning: pg_trgm unavailable; case search will use a slower scan."
+
 echo "=== Database setup complete ==="
 echo "Next: Run ingest.py to populate with PDFs"
 echo "  python ingestion/ingest.py --input /path/to/pdfs"
