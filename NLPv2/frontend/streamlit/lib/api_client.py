@@ -8,7 +8,8 @@ DOCUMENT_TIMEOUT = 300  # OCR + 7B generation on an uploaded document can be slo
 DEFAULT_TIMEOUT = 60
 # Probes every candidate model live (10 at a time, 10s cap each) — bounded
 # but can legitimately take longer than a normal request on a big catalog.
-GEMINI_TEST_TIMEOUT = 120
+# Shared across all three "test API key" flows (Gemini, Anthropic, OpenAI).
+MODEL_TEST_TIMEOUT = 120
 
 
 class LegalRAGAPIError(Exception):
@@ -112,7 +113,31 @@ def gemini_models(api_key: str) -> List[str]:
         resp = requests.post(
             _url("/models/gemini"),
             data={"api_key": api_key},
-            timeout=GEMINI_TEST_TIMEOUT,
+            timeout=MODEL_TEST_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    return _handle_response(resp)["data"]["models"]
+
+
+def anthropic_models(api_key: str) -> List[str]:
+    try:
+        resp = requests.post(
+            _url("/models/anthropic"),
+            data={"api_key": api_key},
+            timeout=MODEL_TEST_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    return _handle_response(resp)["data"]["models"]
+
+
+def openai_models(api_key: str) -> List[str]:
+    try:
+        resp = requests.post(
+            _url("/models/openai"),
+            data={"api_key": api_key},
+            timeout=MODEL_TEST_TIMEOUT,
         )
     except requests.RequestException as e:
         raise LegalRAGAPIError(str(e)) from e

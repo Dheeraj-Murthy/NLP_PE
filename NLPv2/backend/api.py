@@ -113,6 +113,28 @@ async def list_gemini_models(api_key: str = Form(...)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/models/anthropic")
+async def list_anthropic_models(api_key: str = Form(...)):
+    from llm.anthropic_backend import list_available_models
+
+    try:
+        models = list_available_models(api_key)
+        return {"success": True, "data": {"models": models}}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/models/openai")
+async def list_openai_models(api_key: str = Form(...)):
+    from llm.openai_backend import list_available_models
+
+    try:
+        models = list_available_models(api_key)
+        return {"success": True, "data": {"models": models}}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/chat/clear")
 async def clear_chat():
     if not pipeline:

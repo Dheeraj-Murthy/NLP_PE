@@ -1,15 +1,25 @@
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import streamlit as st
 
 from lib import api_client
 from lib.api_client import LegalRAGAPIError
 
+# (model_id or None for local Qwen, is_external, provider slug or None).
+# The provider slug namespaces session-state keys and selects which
+# "test API key" endpoint/fetcher _render_live_model_picker uses below.
 MODEL_OPTIONS = {
-    "Qwen (local, default)": (None, False),
-    "Claude (Anthropic API)": ("claude-sonnet-5", True),
-    "GPT (OpenAI API)": ("gpt-4o", True),
-    "Gemini (Google API)": ("gemini-2.5-pro", True),
+    "Qwen (local, default)": (None, False, None),
+    "Claude (Anthropic API)": ("claude-sonnet-5", True, "anthropic"),
+    "GPT (OpenAI API)": ("gpt-4o", True, "openai"),
+    "Gemini (Google API)": ("gemini-2.5-pro", True, "gemini"),
+}
+
+PROVIDER_LABELS = {"anthropic": "Anthropic", "openai": "OpenAI", "gemini": "Google"}
+PROVIDER_MODEL_FETCHERS: Dict[str, Callable[[str], List[str]]] = {
+    "anthropic": api_client.anthropic_models,
+    "openai": api_client.openai_models,
+    "gemini": api_client.gemini_models,
 }
 
 
@@ -32,48 +42,54 @@ def render_model_selector(key_prefix: str) -> Tuple[Optional[str], bool, Optiona
     choice = st.selectbox(
         "Model", list(MODEL_OPTIONS.keys()), key=f"{key_prefix}_model_choice"
     )
-    model, is_external = MODEL_OPTIONS[choice]
+    model, is_external, provider = MODEL_OPTIONS[choice]
 
     external_ok = False
     api_key = None
     if is_external:
-        if model.startswith("claude"):
-            provider = "Anthropic"
-        elif model.startswith("gemini"):
-            provider = "Google"
-        else:
-            provider = "OpenAI"
+        provider_label = PROVIDER_LABELS[provider]
         st.caption(
             f":material/warning: Sends the retrieved case text and your question to "
-            f"{provider}'s API — not local.",
+            f"{provider_label}'s API — not local.",
         )
         external_ok = st.checkbox(
             "I understand — send this query externally",
             key=f"{key_prefix}_external_ok",
         )
         api_key = st.text_input(
-            f"{provider} API key (optional)",
+            f"{provider_label} API key (optional)",
             type="password",
             key=f"{key_prefix}_api_key",
             help="Leave blank to use the server's own configured key, if any. "
             "Held only in this browser session, never saved.",
         )
 
-        if model.startswith("gemini"):
-            model = _render_gemini_model_picker(key_prefix, api_key, default_model=model)
+        model = _render_live_model_picker(
+            key_prefix,
+            provider,
+            provider_label,
+            api_key,
+            default_model=model,
+            fetch_models=PROVIDER_MODEL_FETCHERS[provider],
+        )
 
     return model, external_ok, (api_key or None), is_external
 
 
-def _render_gemini_model_picker(
-    key_prefix: str, api_key: Optional[str], default_model: str
+def _render_live_model_picker(
+    key_prefix: str,
+    provider: str,
+    provider_label: str,
+    api_key: Optional[str],
+    default_model: str,
+    fetch_models: Callable[[str], List[str]],
 ) -> Optional[str]:
-    """Validates the key against Gemini's ListModels API and, on success, shows
-    a dropdown of only the models that key can actually use. No hardcoded
-    fallback — Google deprecates/renames model ids over time (e.g.
-    gemini-2.5-pro 404ing for new keys), so a stale pinned default would
-    silently route to a dead model instead of one this key can really use.
-    Returns None (blocking send) until a real, tested model is chosen.
+    """Validates the key against the provider's own live API and, on success,
+    shows a dropdown of only the models that key can actually use right now.
+    No hardcoded fallback — providers deprecate/rename model ids over time
+    (e.g. gemini-2.5-pro 404ing for new keys), so a stale pinned default
+    would silently route to a dead model instead of one this key can really
+    use. Returns None (blocking send) until a real, tested model is chosen.
 
     Testing triggers two ways that both run the exact same code path: clicking
     "Test API key", or just pressing Enter after typing the key (committing a
@@ -81,10 +97,10 @@ def _render_gemini_model_picker(
     click — no separate click needed after typing). The spinner replaces the
     button itself (via the shared placeholder) rather than appearing as a
     separate element, so there's one visual element, not two."""
-    models_state_key = f"{key_prefix}_gemini_models"
-    tested_key_state = f"{key_prefix}_gemini_tested_key"
-    last_seen_key_state = f"{key_prefix}_gemini_key_seen"
-    error_state_key = f"{key_prefix}_gemini_test_error"
+    models_state_key = f"{key_prefix}_{provider}_models"
+    tested_key_state = f"{key_prefix}_{provider}_tested_key"
+    last_seen_key_state = f"{key_prefix}_{provider}_key_seen"
+    error_state_key = f"{key_prefix}_{provider}_test_error"
 
     # Key changed since last successful test — stale model list no longer applies.
     if st.session_state.get(tested_key_state) != api_key:
@@ -96,14 +112,14 @@ def _render_gemini_model_picker(
 
     button_slot = st.empty()
     clicked = button_slot.button(
-        "Test API key", key=f"{key_prefix}_test_gemini_key", disabled=not api_key
+        "Test API key", key=f"{key_prefix}_test_{provider}_key", disabled=not api_key
     )
 
     if clicked or key_just_committed:
         with button_slot:
             with st.spinner("Testing..."):
                 try:
-                    st.session_state[models_state_key] = api_client.gemini_models(api_key)
+                    st.session_state[models_state_key] = fetch_models(api_key)
                     st.session_state[tested_key_state] = api_key
                     st.session_state[error_state_key] = None
                 except Exception as e:
@@ -127,16 +143,16 @@ def _render_gemini_model_picker(
             else 0
         )
         return st.selectbox(
-            "Gemini model",
+            f"{provider_label} model",
             available_models,
             index=default_index,
-            key=f"{key_prefix}_gemini_model_choice",
+            key=f"{key_prefix}_{provider}_model_choice",
         )
 
     if available_models is not None:
         # Tested successfully but the key has access to nothing usable.
         st.warning(
-            "This key has no models available that support generateContent.",
+            "This key has no models available for chat.",
             icon=":material/block:",
         )
     elif error is None:
