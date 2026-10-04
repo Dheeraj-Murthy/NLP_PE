@@ -151,7 +151,7 @@ docker-compose.override.yml
 # Local dev data
 # =========================
 uploads/
-data/*
+data/**
 storage/
 
 # =========================
@@ -170,12 +170,15 @@ CLAUDE.md
 # =========================
 # Data
 # =========================
-# (redundant with data/* above — kept as an explicit root-anchored glob so
+# (redundant with data/** above — kept as an explicit root-anchored glob so
 # the .dvc negation below is unambiguous)
-./data/*
+data/**
 # DVC pointer files must stay tracked even though the real data under
 # data/ is ignored above — they're small metadata, not the actual corpus.
-!data/*.dvc
+# Must unignore directories first (data/**/) — git won't descend into an
+# already-ignored dir to apply a deeper negation like data/statutes/*.dvc.
+!data/**/
+!data/**/*.dvc
 
 # =========================
 # MLflow / ingestion pipeline outputs
