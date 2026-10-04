@@ -65,6 +65,19 @@ pip install -r requirements.txt
 RAG_API_URL=http://localhost:8000 streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 ```
 
+Or, on a server where the venv already exists, `run.sh` does both of the
+above as backgrounded processes in one command:
+
+```bash
+./run.sh start      # git pull, install deps if needed, start API + frontend
+./run.sh stop        # stop both
+./run.sh restart      # stop then start
+./run.sh status       # check what's running, with PIDs
+```
+
+(`./run.sh` with no argument defaults to `start`.) Logs land in `logs/`,
+PID files in `.run/`.
+
 Try a query from the CLI instead:
 
 ```bash
