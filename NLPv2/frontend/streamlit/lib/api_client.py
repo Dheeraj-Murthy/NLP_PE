@@ -205,11 +205,11 @@ def retrieval_test(query_text: str) -> Dict[str, Any]:
     return _handle_response(resp)["data"]
 
 
-def graph_judgment(judgment_id: int, depth: int = 2) -> Dict[str, Any]:
+def graph_judgment(judgment_id: int, depth: int = 2, max_nodes: int = 100) -> Dict[str, Any]:
     try:
         resp = requests.get(
             _url(f"/graph/judgment/{judgment_id}"),
-            params={"depth": depth},
+            params={"depth": depth, "max_nodes": max_nodes},
             timeout=DEFAULT_TIMEOUT,
         )
     except requests.RequestException as e:

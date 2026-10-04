@@ -4,8 +4,15 @@ from lib import api_client
 from lib.ui_helpers import render_api_error
 
 
+# Graphviz lays the graph out in the browser, and edge labels are by far the
+# most expensive part of that layout. Past this many edges, drop them and
+# rely on the edges table instead.
+EDGE_LABEL_LIMIT = 60
+
+
 def _build_dot(nodes, edges) -> str:
-    lines = ["digraph {"]
+    show_edge_labels = len(edges) <= EDGE_LABEL_LIMIT
+    lines = ["digraph {", "  graph [rankdir=LR];", "  node [shape=box];"]
     for n in nodes:
         label = n.get("label", f"Case #{n['id']}").replace('"', "'")
         fill = "#18181B" if n.get("is_center") else "#F4F4F5"
@@ -14,8 +21,11 @@ def _build_dot(nodes, edges) -> str:
             f'  "{n["id"]}" [label="{label}", style=filled, fillcolor="{fill}", fontcolor="{font}"];'
         )
     for e in edges:
-        rel = e.get("relationship", "cited").replace('"', "'")
-        lines.append(f'  "{e["source"]}" -> "{e["target"]}" [label="{rel}"];')
+        if show_edge_labels:
+            rel = (e.get("relationship") or "cited").replace('"', "'")
+            lines.append(f'  "{e["source"]}" -> "{e["target"]}" [label="{rel}"];')
+        else:
+            lines.append(f'  "{e["source"]}" -> "{e["target"]}";')
     lines.append("}")
     return "\n".join(lines)
 
@@ -62,16 +72,32 @@ with tab_ego:
             "Judgment ID", min_value=1, value=selected_judgment_id or 1, step=1
         )
         depth = st.slider("Depth", min_value=1, max_value=3, value=2)
+        max_nodes = st.number_input(
+            "Max nodes",
+            min_value=10,
+            max_value=500,
+            value=100,
+            step=10,
+            help="Large graphs are slow to draw. Closest and most-cited cases are kept first.",
+        )
 
     if st.button("Load ego graph", icon=":material/play_arrow:", type="primary"):
         try:
-            data = api_client.graph_judgment(int(judgment_id), depth=depth)
+            data = api_client.graph_judgment(int(judgment_id), depth=depth, max_nodes=int(max_nodes))
             nodes = data.get("nodes", [])
             edges = data.get("edges", [])
 
             if not nodes:
                 st.warning(f"Judgment {judgment_id} not found in the citation graph.", icon=":material/search_off:")
             else:
+                if data.get("truncated"):
+                    st.info(
+                        f"Showing {len(nodes)} of {data.get('total_nodes')} cases within {depth} hops. "
+                        "Lower the depth or raise Max nodes to see more.",
+                        icon=":material/filter_alt:",
+                    )
+                if len(edges) > EDGE_LABEL_LIMIT:
+                    st.caption("Edge labels hidden for large graphs — see the edges table below.")
                 st.graphviz_chart(_build_dot(nodes, edges))
                 with st.expander(f"Edges ({len(edges)})", icon=":material/list:"):
                     st.dataframe(edges, width="stretch")

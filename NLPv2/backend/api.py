@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List, Dict, Any
 import tempfile
@@ -215,12 +215,16 @@ async def get_status():
 
 
 @app.get("/graph/judgment/{judgment_id}")
-async def get_citation_graph(judgment_id: int, depth: int = 2):
+async def get_citation_graph(
+    judgment_id: int,
+    depth: int = Query(2, ge=1, le=3),
+    max_nodes: int = Query(100, ge=1, le=500),
+):
     if not graph_manager:
         raise HTTPException(status_code=500, detail="Graph manager not initialized")
 
     try:
-        subgraph = graph_manager.get_subgraph(judgment_id, depth=depth)
+        subgraph = graph_manager.get_subgraph(judgment_id, depth=depth, max_nodes=max_nodes)
         return {"success": True, "data": subgraph}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

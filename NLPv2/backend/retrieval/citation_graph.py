@@ -101,18 +101,41 @@ class CitationGraphManager:
 
         return self.graph.number_of_edges()
 
-    def get_subgraph(self, judgment_id: int, depth: int = 2) -> Dict[str, Any]:
+    def get_subgraph(
+        self, judgment_id: int, depth: int = 2, max_nodes: int = 100
+    ) -> Dict[str, Any]:
         """
-        Extract an N-hop ego graph around a specific judgment ID.
-        Returns JSON-serializable dict of nodes and edges.
+        Extract an N-hop ego graph around a specific judgment ID, capped at
+        max_nodes. Returns JSON-serializable dict of nodes and edges.
+
+        Around well-cited judgments a depth-3 neighbourhood can run into
+        thousands of nodes, which the frontend cannot lay out. When the cap is
+        hit, nodes closer to the center are kept first and, within a hop
+        level, the most-connected ones win. Since every hop level is kept in
+        full before the next one is touched, the result stays connected.
         """
         self.load_graph_from_db()
 
         if judgment_id not in self.graph:
-            return {"nodes": [], "edges": [], "center_id": judgment_id}
+            return {
+                "nodes": [],
+                "edges": [],
+                "center_id": judgment_id,
+                "total_nodes": 0,
+                "truncated": False,
+            }
 
-        # Compute ego graph
-        ego_g = nx.ego_graph(self.graph, judgment_id, radius=depth, undirected=True)
+        dist = nx.single_source_shortest_path_length(
+            self.graph.to_undirected(as_view=True), judgment_id, cutoff=depth
+        )
+        total_nodes = len(dist)
+        truncated = total_nodes > max_nodes
+        if truncated:
+            keep = sorted(dist, key=lambda n: (dist[n], -self.graph.degree(n), n))[:max_nodes]
+        else:
+            keep = list(dist)
+
+        ego_g = self.graph.subgraph(keep)
 
         nodes = []
         for n, data in ego_g.nodes(data=True):
@@ -137,7 +160,13 @@ class CitationGraphManager:
                 }
             )
 
-        return {"center_id": judgment_id, "nodes": nodes, "edges": edges}
+        return {
+            "center_id": judgment_id,
+            "nodes": nodes,
+            "edges": edges,
+            "total_nodes": total_nodes,
+            "truncated": truncated,
+        }
 
     def get_landmark_cases(self, limit: int = 10) -> List[Dict[str, Any]]:
         """
