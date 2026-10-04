@@ -1,6 +1,8 @@
 import os
 import re
+import sys
 import json
+import time
 import argparse
 import subprocess
 from pathlib import Path
@@ -10,6 +12,11 @@ from psycopg2.extras import execute_values
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
+
+# backend/ is a sibling directory, not a package ingestion/ installs — add it
+# to sys.path to reuse tracking.py's MLflow setup instead of duplicating it.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
+import tracking
 
 # Initialize local embedding model
 try:
@@ -399,16 +406,21 @@ def _create_size_based_chunks(text: str) -> List[Tuple[str, str]]:
     return chunks
 
 
-def ingest_judgment_from_pdf(pdf_path: str, conn) -> int | None:
+def ingest_judgment_from_pdf(pdf_path: str, conn) -> Dict[str, Any]:
     """Ingest a single PDF judgment into the database, using a connection
     shared across the whole ingestion run (see main()) rather than opening
     a fresh one per document — at full-corpus scale that's tens of
-    thousands of avoidable connection setup/teardown round-trips."""
+    thousands of avoidable connection setup/teardown round-trips.
+
+    Returns {"judgment_id": int|None, "chunks": int, "embeddings": int,
+    "error": str|None} — main() aggregates these into MLflow run metrics,
+    so failure needs to be distinguishable from "no text extracted" rather
+    than both collapsing into the same None."""
     # 1. Extract raw text
     raw_text = extract_text_from_pdf(pdf_path)
     if not raw_text.strip():
         tqdm.write(f"Warning: No text extracted from {pdf_path}")
-        return None
+        return {"judgment_id": None, "chunks": 0, "embeddings": 0, "error": "no_text_extracted"}
 
     # 2. Clean BEFORE anything else — metadata parsing, chunking, and DB storage
     #    all operate on the same clean text.
@@ -493,12 +505,17 @@ def ingest_judgment_from_pdf(pdf_path: str, conn) -> int | None:
             )
 
         conn.commit()
-        return judgment_id
+        return {
+            "judgment_id": judgment_id,
+            "chunks": len(chunk_ids),
+            "embeddings": len(embedding_rows),
+            "error": None,
+        }
 
     except Exception as e:
         conn.rollback()
         tqdm.write(f"Error processing {pdf_path}: {e}")
-        return None
+        return {"judgment_id": None, "chunks": 0, "embeddings": 0, "error": str(e)}
     finally:
         cur.close()
 
@@ -534,27 +551,69 @@ def main():
         user=os.environ.get("DB_USER", "postgres"),
         password=os.environ.get("DB_PASSWORD", "postgres"),
     )
+    start_time = time.time()
     try:
         successful = 0
+        no_text_count = 0
+        error_count = 0
+        total_chunks = 0
+        total_embeddings = 0
+
         progress = tqdm(pdf_files, desc="Ingesting", unit="doc")
         for pdf_file in progress:
-            judgment_id = ingest_judgment_from_pdf(str(pdf_file), conn)
-            if judgment_id:
+            result = ingest_judgment_from_pdf(str(pdf_file), conn)
+            if result["judgment_id"]:
                 successful += 1
+                total_chunks += result["chunks"]
+                total_embeddings += result["embeddings"]
+            elif result["error"] == "no_text_extracted":
+                no_text_count += 1
+            else:
+                error_count += 1
             progress.set_postfix(ok=successful, failed=progress.n + 1 - successful)
+
+        duration = time.time() - start_time
+        failed = len(pdf_files) - successful
 
         print(
             f"\nProcessing complete. "
             f"Successfully ingested {successful}/{len(pdf_files)} judgments."
         )
 
-        # Small run manifest — gives a DVC pipeline stage a file-based output
-        # to hash/cache, since ingestion otherwise writes only to Postgres.
+        tracking.log_ingestion_run(
+            "ingest.py",
+            params={
+                "input_dir": str(input_dir),
+                "embedding_model": "BAAI/bge-base-en-v1.5",
+            },
+            metrics={
+                "pdf_count": len(pdf_files),
+                "successful": successful,
+                "failed": failed,
+                "no_text_extracted": no_text_count,
+                "errors": error_count,
+                "chunks_created": total_chunks,
+                "embeddings_created": total_embeddings,
+                "duration_seconds": round(duration, 2),
+            },
+        )
+
+        # Small run manifest — gives the DVC pipeline stage a file-based
+        # metrics output (dvc.yaml declares this under `metrics:`, so
+        # `dvc metrics diff` can show these numbers changing across git
+        # commits) since ingestion otherwise writes only to Postgres. Same
+        # fields as the MLflow run above — one is the per-run dashboard,
+        # the other is the git-diffable snapshot; they shouldn't diverge.
         manifest = {
             "input_dir": str(input_dir),
             "pdf_count": len(pdf_files),
             "successful": successful,
-            "failed": len(pdf_files) - successful,
+            "failed": failed,
+            "no_text_extracted": no_text_count,
+            "errors": error_count,
+            "chunks_created": total_chunks,
+            "embeddings_created": total_embeddings,
+            "duration_seconds": round(duration, 2),
             "embedding_model": "BAAI/bge-base-en-v1.5",
             "timestamp": datetime.utcnow().isoformat(),
         }

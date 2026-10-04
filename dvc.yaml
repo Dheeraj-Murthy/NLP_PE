@@ -8,6 +8,6 @@ stages:
     params:
       - ../../params.yaml:
           - ingest.input_dir
-    outs:
+    metrics:
       - outputs/ingest_manifest.json:
           cache: false

@@ -17,12 +17,18 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
 import psycopg2
 import numpy as np
 from dotenv import load_dotenv
+
+# backend/ is a sibling directory, not a package ingestion/ installs — add it
+# to sys.path to reuse tracking.py's MLflow setup instead of duplicating it.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
+import tracking
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -209,7 +215,9 @@ def embed_chunks(model, chunks: List[str], batch: int = EMBED_BATCH) -> np.ndarr
 # ---------------------------------------------------------------------------
 
 def ingest_one(pdf_path: Path, *, layout: bool, title: str, short_title: str,
-               year: int, model, conn, dsn: str):
+               year: int, model, conn, dsn: str) -> Dict[str, int]:
+    """Returns {"parsed": int, "embedded": int, "inserted": int} — main()
+    aggregates these across all statute PDFs into one MLflow run."""
     print(f"\n{'='*60}")
     print(f"Ingesting: {pdf_path.name}")
     print(f"  title={title}  year={year}  layout={layout}")
@@ -223,7 +231,7 @@ def ingest_one(pdf_path: Path, *, layout: bool, title: str, short_title: str,
     print(f"  Parsed {len(chunks)} sections/articles")
     if not chunks:
         print("  ⚠ Nothing to ingest – skipping")
-        return
+        return {"parsed": 0, "embedded": 0, "inserted": 0}
 
     # Embed
     texts = [c["content"] for c in chunks]
@@ -274,6 +282,7 @@ def ingest_one(pdf_path: Path, *, layout: bool, title: str, short_title: str,
 
     conn.commit()
     print(f"  ✓ Done – {len(chunks)} sections ingested for {short_title}")
+    return {"parsed": len(chunks), "embedded": len(embeddings), "inserted": inserted}
 
 
 # ---------------------------------------------------------------------------
@@ -315,13 +324,32 @@ def main():
     dsn = args.dsn
     conn = get_conn(dsn)
 
+    start_time = time.time()
     try:
         create_tables(conn)
+        total_parsed = 0
+        total_embedded = 0
+        total_inserted = 0
         for pdf_path, layout, title, short, year in configs:
-            ingest_one(pdf_path, layout=layout, title=title, short_title=short,
-                       year=year, model=model, conn=conn, dsn=dsn)
+            stats = ingest_one(pdf_path, layout=layout, title=title, short_title=short,
+                                year=year, model=model, conn=conn, dsn=dsn)
+            total_parsed += stats["parsed"]
+            total_embedded += stats["embedded"]
+            total_inserted += stats["inserted"]
     finally:
         conn.close()
+
+    tracking.log_ingestion_run(
+        "ingest_statutes.py",
+        params={"dir": str(pdf_dir)},
+        metrics={
+            "statute_pdfs": len(configs),
+            "sections_parsed": total_parsed,
+            "sections_embedded": total_embedded,
+            "sections_inserted": total_inserted,
+            "duration_seconds": round(time.time() - start_time, 2),
+        },
+    )
 
     print(f"\n{'='*60}")
     print("Statute ingestion complete ✓")
