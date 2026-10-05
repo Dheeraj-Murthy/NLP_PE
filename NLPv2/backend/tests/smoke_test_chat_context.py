@@ -10,12 +10,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from chat_context import (
     carried_documents,
     cited_documents,
+    clean_rewrite,
     context_window,
     export_conversation,
     is_follow_up,
+    needs_rewrite,
     parse_import,
     prompt_history,
+    question_with_reading,
     retrieval_query,
+    rewrite_request,
     split_for_summary,
 )
 from chat_store import TITLE_MAX_CHARS, is_valid_session_id, title_from
@@ -29,6 +33,7 @@ def test_follow_up_detection():
         "what about bail?",
         "Why?",
         "Explain the above in simple terms",
+        "what happens in case the accused is a minor",
     ]
     fresh = [
         "What is the punishment for theft under the Bharatiya Nyaya Sanhita?",
@@ -52,6 +57,26 @@ def test_retrieval_query():
     assert retrieval_query(fresh, prior) == fresh
     assert retrieval_query("And that?", []) == "And that?"
     print("✓ retrieval query passed")
+
+
+def test_query_rewrite():
+    print("--- Testing follow-up rewrite helpers ---")
+    prior = [
+        {"role": "user", "content": "Whats the penalty of a drunk driving in india?"},
+        {"role": "assistant", "content": "Answer: ... Sources: ...", "prompt_text": "Up to six months " + "x " * 400},
+    ]
+    assert not needs_rewrite([]) and needs_rewrite(prior)
+    req = rewrite_request("what happens in case the accused is a minor", prior)
+    assert "drunk driving" in req and req.endswith("Standalone question:")
+    assert "Sources:" not in req and len(req) < 1000
+    assert clean_rewrite('Standalone question: "What is the liability of a minor caught drunk driving?"\n') \
+        == "What is the liability of a minor caught drunk driving?"
+    assert clean_rewrite("\n\nQuery: bail for minors") == "bail for minors"
+    assert clean_rewrite("") is None and clean_rewrite("word " * 100) is None
+    assert question_with_reading("Why?", "why?") == "Why?"
+    q = question_with_reading("what if he is a minor", "Drunk driving by a minor in India")
+    assert q.startswith("what if he is a minor") and "Drunk driving by a minor" in q
+    print("✓ follow-up rewrite helpers passed")
 
 
 def test_prompt_history():
@@ -126,6 +151,7 @@ def test_titles():
 if __name__ == "__main__":
     test_follow_up_detection()
     test_retrieval_query()
+    test_query_rewrite()
     test_prompt_history()
     test_windows_and_summary_split()
     test_carried_documents_and_export()

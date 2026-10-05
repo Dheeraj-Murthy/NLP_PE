@@ -8,12 +8,15 @@ shown to the model again on later turns. History is stored model-neutral, so
 switching models mid-chat needs nothing from the user — a smaller window just
 means more of the conversation is summarised.
 
-Retrieval only sees one query, so a follow-up such as "what are its
-exceptions?" would search for "its exceptions". When a message looks like a
-follow-up, the previous question's retrieval query is prepended, so a chain
-of follow-ups stays on the topic it started with. Detection is a cheap
-heuristic (referring words, a connective opener, or a very short message);
-the query actually used is returned in debug info.
+Retrieval only sees one query, so a follow-up such as "what happens if the
+accused is a minor?" (asked after a drunk-driving question) would search for
+minors in general. Once a chat has earlier turns, the answering model
+rewrites each new message as a standalone search query using the recent
+conversation; the answer prompt also gets that reading of the question. If
+the rewrite fails, a cheap heuristic takes over: when a message looks like a
+follow-up (referring words, a connective opener, or a very short message),
+the previous question's retrieval query is prepended. The query actually
+used is stored with the message and returned in debug info.
 """
 
 import os
@@ -67,6 +70,8 @@ REFERRING_WORDS = frozenset(
 FOLLOW_UP_OPENERS = (
     "and ", "also ", "but ", "so ", "then ", "what about", "how about",
     "what if", "why ", "why?", "how come", "in that case", "tell me more", "explain more",
+    "what happens if", "what happens in case", "what happens when", "in case ", "suppose ",
+    "if ", "even if", "is it ", "does it ", "can it ",
 )
 SHORT_MESSAGE_WORDS = 4
 # Cap on the carried-over topic, so long chains don't grow the query forever.
@@ -99,6 +104,71 @@ def retrieval_query(message: str, prior: List[Dict[str, Any]]) -> str:
         return message
     carried = " ".join(previous.split()[-CARRIED_QUERY_WORDS:])
     return f"{carried} {message}"
+
+
+# Model rewrite of follow-ups into standalone queries.
+REWRITE_SYSTEM_PROMPT = (
+    "You turn the latest message of a legal research chat into a standalone question "
+    "for searching a database of Indian case law and statutes. Use the earlier "
+    "conversation to fill in what the message leaves out: the subject, offence, statute, "
+    "party or facts it refers back to (e.g. after a question about drunk driving, "
+    "\"what if the accused is a minor\" becomes \"What is the liability when a minor "
+    "is caught drunk driving in India?\"). If the message starts a new, unrelated topic, "
+    "return it unchanged. Do not answer it. Reply with the question only, on one line."
+)
+REWRITE_TURNS = 3  # recent user/assistant pairs shown to the rewriter
+REWRITE_ANSWER_CHARS = 500  # each earlier answer is cut to this length
+REWRITE_MAX_TOKENS = 96
+REWRITE_MAX_WORDS = 60
+_REWRITE_PREFIX = re.compile(
+    r"^\s*(standalone question|rewritten question|search query|question|query)\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def needs_rewrite(prior: List[Dict[str, Any]]) -> bool:
+    """A message can only depend on the conversation if there was one."""
+    return any(m["role"] == "user" for m in prior)
+
+
+def rewrite_request(message: str, prior: List[Dict[str, Any]]) -> str:
+    """The text asking the model to rewrite `message` as a standalone question."""
+    recent = prior[-2 * REWRITE_TURNS:]
+    while recent and recent[0]["role"] != "user":
+        recent = recent[1:]
+    lines = ["Conversation so far:"]
+    for msg in recent:
+        if msg["role"] == "user":
+            lines.append(f"User: {msg['content'].strip()}")
+        else:
+            answer = " ".join((msg.get("prompt_text") or msg["content"]).split())
+            if len(answer) > REWRITE_ANSWER_CHARS:
+                answer = answer[:REWRITE_ANSWER_CHARS].rsplit(" ", 1)[0] + " …"
+            lines.append(f"Assistant: {answer}")
+    lines += ["", f"Latest message: {message.strip()}", "", "Standalone question:"]
+    return "\n".join(lines)
+
+
+def clean_rewrite(text: str) -> Optional[str]:
+    """The rewritten question from the model's reply, or None if the reply
+    isn't usable (empty, an answer instead of a question, far too long)."""
+    for line in (text or "").splitlines():
+        line = _REWRITE_PREFIX.sub("", line).strip().strip("\"'`").strip()
+        if line:
+            break
+    else:
+        return None
+    if len(line.split()) > REWRITE_MAX_WORDS:
+        return None
+    return line
+
+
+def question_with_reading(message: str, standalone: str) -> str:
+    """The question as given to the answering model: the user's words, plus
+    how they read in this conversation when that differs."""
+    if " ".join(standalone.lower().split()) == " ".join(message.lower().split()):
+        return message
+    return f"{message}\n\n(In this conversation, this means: {standalone})"
 
 
 def _message_tokens(msg: Dict[str, Any], count_tokens: Callable[[str], int]) -> int:

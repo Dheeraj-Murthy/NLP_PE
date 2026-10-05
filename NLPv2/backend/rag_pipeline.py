@@ -14,10 +14,13 @@ from retrieval.citation_graph import CitationGraphManager
 from tracking import log_query_run
 from chat_store import ChatStore, DEFAULT_SESSION
 from chat_context import (
+    REWRITE_MAX_TOKENS,
+    REWRITE_SYSTEM_PROMPT,
     SUMMARY_SYSTEM_PROMPT,
     batches_for_summary,
     carried_documents,
     cited_documents,
+    clean_rewrite,
     context_window,
     display_history,
     export_conversation,
@@ -25,8 +28,11 @@ from chat_context import (
     fits,
     parse_import,
     history_budget,
+    needs_rewrite,
     prompt_history,
+    question_with_reading,
     retrieval_query,
+    rewrite_request,
     split_for_summary,
     summary_request,
     summary_system_note,
@@ -624,9 +630,10 @@ class LegalRAGPipeline:
         uses the shared default session. The model sees the whole
         conversation while it fits its context window, with the oldest turns
         summarised once it doesn't; documents cited in recent answers are
-        shown again; follow-up questions are retrieved together with the
-        topic of the previous question. Works the same whichever model
-        answers each turn."""
+        shown again; follow-up questions are rewritten by the model into
+        standalone questions for retrieval, and the model is told that
+        reading of the question too. Works the same whichever model answers
+        each turn."""
         session_id = session_id or DEFAULT_SESSION
         try:
             backend = self._resolve_backend(model, external_ok, api_key)
@@ -640,7 +647,7 @@ class LegalRAGPipeline:
             }
 
         prior = self.chat_store.messages(session_id)
-        search_query = retrieval_query(user_message, prior)
+        search_query = self._standalone_query(backend, user_message, prior)
         self.chat_store.add_message(
             session_id, "user", user_message, retrieval_query=search_query
         )
@@ -704,10 +711,14 @@ class LegalRAGPipeline:
 
             # Earlier turns only — the current message goes to generate()
             # separately as user_query.
+            # The user's words, plus how they read in this conversation, so
+            # a follow-up is answered on the conversation's topic rather than
+            # on whatever the retrieved documents happen to be about.
+            question = question_with_reading(user_message, search_query)
             window = context_window(backend.model_id)
             fixed_tokens = sum(
                 backend.count_tokens(t)
-                for t in (self.prompt_builder.SYSTEM_PROMPT, context_block, user_message)
+                for t in (self.prompt_builder.SYSTEM_PROMPT, context_block, question)
             )
             history, summary, summarized = self._conversation_context(
                 session_id,
@@ -723,7 +734,7 @@ class LegalRAGPipeline:
             generation_start = time.time()
             gen = backend.generate(
                 context_block=context_block,
-                user_query=user_message,
+                user_query=question,
                 system_prompt=system_prompt,
                 conversation_history=history,
                 max_new_tokens=self.max_new_tokens,
@@ -819,6 +830,29 @@ class LegalRAGPipeline:
                 "session_id": session_id,
                 "conversation_history": history_for_display(),
             }
+
+    def _standalone_query(
+        self, backend: LLMBackend, user_message: str, prior: List[Dict[str, Any]]
+    ) -> str:
+        """The query to retrieve with. In an ongoing chat this turn's model
+        rewrites the message as a standalone question; if that fails, the
+        follow-up heuristic is used instead."""
+        if not needs_rewrite(prior):
+            return user_message
+        try:
+            gen = backend.generate(
+                context_block="",
+                user_query=rewrite_request(user_message, prior),
+                system_prompt=REWRITE_SYSTEM_PROMPT,
+                conversation_history=None,
+                max_new_tokens=REWRITE_MAX_TOKENS,
+            )
+            rewritten = clean_rewrite(gen.text)
+            if rewritten:
+                return rewritten
+        except Exception as err:
+            print(f"Warning: could not rewrite follow-up query: {err}")
+        return retrieval_query(user_message, prior)
 
     def _conversation_context(
         self,
