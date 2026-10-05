@@ -1,6 +1,10 @@
 #!/bin/bash
-# Database initialization script for Legal RAG
-# Run this once to set up PostgreSQL with pgvector
+# Database initialization script for Legal RAG.
+# Creates the database if needed and applies the schema in backend/schema/
+# (judgments.sql, statutes.sql). Safe to re-run: it only adds what is missing.
+#
+#   bash init_db.sh            create / bring up to date
+#   bash init_db.sh --reset    DROP every table and recreate empty (asks first)
 
 set -e
 
@@ -12,6 +16,10 @@ DB_PORT="${DB_PORT:-5432}"
 DB_NAME="${DB_NAME:-legal_rag}"
 DB_USER="${DB_USER:-postgres}"
 DB_PASSWORD="${DB_PASSWORD:-postgres}"
+export PGPASSWORD="$DB_PASSWORD"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCHEMA_DIR="$SCRIPT_DIR/../../backend/schema"
 
 echo "Database: $DB_NAME on $DB_HOST:$DB_PORT"
 
@@ -21,92 +29,26 @@ if ! command -v psql &>/dev/null; then
 	exit 1
 fi
 
+PSQL=(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER")
+
 # Create database if it doesn't exist
 echo "Creating database if not exists..."
-psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -c "CREATE DATABASE $DB_NAME;" 2>/dev/null || true
+"${PSQL[@]}" -c "CREATE DATABASE $DB_NAME;" 2>/dev/null || true
 
-# Connect to database and run schema
-echo "Creating schema and tables..."
-psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" <<'EOF'
--- Enable vector extension
-CREATE EXTENSION IF NOT EXISTS vector;
+if [ "$1" = "--reset" ]; then
+	read -r -p "This deletes ALL data in $DB_NAME. Type the database name to confirm: " answer
+	if [ "$answer" != "$DB_NAME" ]; then
+		echo "Aborted."
+		exit 1
+	fi
+	"${PSQL[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+		-c "DROP SCHEMA public CASCADE;" -c "CREATE SCHEMA public;"
+fi
 
--- Main judgments table
-CREATE TABLE IF NOT EXISTS judgments (
-    id SERIAL PRIMARY KEY,
-    petitioner TEXT,
-    respondent TEXT,
-    court TEXT,
-    date_of_judgment DATE,
-    bench TEXT[],
-    citations JSONB,
-    judgment_text TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
--- Original PDF, relative to the repository root (see backend/documents.py).
-ALTER TABLE judgments ADD COLUMN IF NOT EXISTS source_file TEXT;
-
--- Judgment chunks table
-CREATE TABLE IF NOT EXISTS judgment_chunks (
-    chunk_id SERIAL PRIMARY KEY,
-    judgment_id INTEGER REFERENCES judgments(id) ON DELETE CASCADE,
-    section TEXT CHECK (section IN ('facts', 'issues', 'arguments', 'ratio', 'judgment')),
-    content TEXT,
-    content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Embeddings table with 768-dimensional vectors for BGE-base-en-v1.5
-CREATE TABLE IF NOT EXISTS judgment_embeddings (
-    chunk_id INTEGER PRIMARY KEY REFERENCES judgment_chunks(chunk_id) ON DELETE CASCADE,
-    embedding vector(768) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Create HNSW index for efficient similarity search
-CREATE INDEX IF NOT EXISTS judgment_embedding_hnsw_idx ON judgment_embeddings 
-USING hnsw (embedding vector_cosine_ops);
-
--- Create additional indexes
-CREATE INDEX IF NOT EXISTS judgment_chunks_judgment_id_idx ON judgment_chunks(judgment_id);
-CREATE INDEX IF NOT EXISTS judgment_chunks_section_idx ON judgment_chunks(section);
-
--- GIN index for BM25-style full-text search (hybrid retrieval, alongside pgvector)
-CREATE INDEX IF NOT EXISTS judgment_chunks_content_tsv_idx ON judgment_chunks USING GIN (content_tsv);
-
--- Citation edges table for precedent network graph
-CREATE TABLE IF NOT EXISTS citation_edges (
-    edge_id SERIAL PRIMARY KEY,
-    source_judgment_id INTEGER NOT NULL REFERENCES judgments(id) ON DELETE CASCADE,
-    target_judgment_id INTEGER REFERENCES judgments(id) ON DELETE CASCADE,
-    cited_text TEXT NOT NULL,
-    relationship_type VARCHAR(50) DEFAULT 'cited',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_citation_edges_source ON citation_edges(source_judgment_id);
-CREATE INDEX IF NOT EXISTS idx_citation_edges_target ON citation_edges(target_judgment_id);
-
--- Prevent duplicate edges on re-runs; NULL targets fold to a sentinel so
--- unresolved citations are deduplicated too.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_citation_edges_unique
-    ON citation_edges(source_judgment_id, COALESCE(target_judgment_id, -1), cited_text);
-
--- Show created tables
-\dt
-SELECT 'Database initialized successfully!' as status;
-EOF
-
-# Citation graph tables (aliases, precomputed stats) — same file
-# build_citation_edges.py applies, so the two can't drift apart.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-echo "Creating citation graph schema..."
-psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
-	-f "$SCRIPT_DIR/../../backend/graph/schema.sql"
-psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
-	-c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" \
-	-c "CREATE INDEX IF NOT EXISTS idx_judgment_aliases_trgm ON judgment_aliases USING GIN (alias_norm gin_trgm_ops);" ||
-	echo "Warning: pg_trgm unavailable; case search will use a slower scan."
+echo "Applying schema..."
+"${PSQL[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+	-f "$SCHEMA_DIR/judgments.sql" -f "$SCHEMA_DIR/statutes.sql"
+"${PSQL[@]}" -d "$DB_NAME" -c '\dt'
 
 echo "=== Database setup complete ==="
 echo "Next: Run ingest.py to populate with PDFs"

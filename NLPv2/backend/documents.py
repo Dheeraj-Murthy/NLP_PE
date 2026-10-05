@@ -28,19 +28,6 @@ DOCUMENTS_ROOT = Path(
 ).resolve()
 STATUTES_DIR = "data/statutes"
 
-# Added to existing tables by ensure_source_columns(); both nullable.
-SOURCE_COLUMNS_SQL = """
-ALTER TABLE judgments ADD COLUMN IF NOT EXISTS source_file TEXT;
-ALTER TABLE IF EXISTS statutes ADD COLUMN IF NOT EXISTS source_file TEXT;
-"""
-
-
-def ensure_source_columns(conn) -> None:
-    with conn.cursor() as cur:
-        cur.execute(SOURCE_COLUMNS_SQL)
-    conn.commit()
-
-
 def relative_source_path(pdf_path: str) -> str:
     """How ingestion records a PDF: relative to DOCUMENTS_ROOT when inside
     it (portable across machines), else the absolute path, which the API

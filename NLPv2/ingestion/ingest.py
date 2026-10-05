@@ -18,7 +18,8 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 import tracking
 from graph.citation_resolver import extract_citation_header, parse_reporter_citations
-from documents import ensure_source_columns, relative_source_path
+from db_schema import ensure_schema
+from documents import relative_source_path
 
 # Initialize local embedding model
 try:
@@ -566,7 +567,7 @@ def main():
         user=os.environ.get("DB_USER", "postgres"),
         password=os.environ.get("DB_PASSWORD", "postgres"),
     )
-    ensure_source_columns(conn)
+    ensure_schema(conn)
     start_time = time.time()
     try:
         successful = 0

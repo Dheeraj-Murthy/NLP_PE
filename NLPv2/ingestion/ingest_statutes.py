@@ -29,7 +29,8 @@ from dotenv import load_dotenv
 # to sys.path to reuse tracking.py's MLflow setup instead of duplicating it.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 import tracking
-from documents import ensure_source_columns, relative_source_path
+from db_schema import ensure_schema
+from documents import relative_source_path
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -53,18 +54,6 @@ def _default_dsn() -> str:
 
 def get_conn(dsn: Optional[str] = None):
     return psycopg2.connect(dsn or _default_dsn())
-
-
-def create_tables(conn):
-    """Run statute_schema.sql if tables don't exist."""
-    cur = conn.cursor()
-    schema_path = Path(__file__).parent / "schema" / "statute_schema.sql"
-    if not schema_path.exists():
-        print(f"⚠ statute_schema.sql not found at {schema_path}")
-        return
-    cur.execute(open(schema_path).read())
-    conn.commit()
-    print("✓ Statute tables ready")
 
 
 def upsert_statute(cur, title: str, short_title: str, year: int,
@@ -331,8 +320,7 @@ def main():
 
     start_time = time.time()
     try:
-        create_tables(conn)
-        ensure_source_columns(conn)
+        ensure_schema(conn)
         total_parsed = 0
         total_embedded = 0
         total_inserted = 0

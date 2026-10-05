@@ -22,7 +22,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
-from graph.schema import ensure_schema
+from db_schema import ensure_schema
 import tracking
 
 try:

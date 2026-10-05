@@ -21,7 +21,7 @@ stages:
       - build_citation_edges.py
       - citation_extractor.py
       - ../backend/graph/citation_resolver.py
-      - ../backend/graph/schema.sql
+      - ../backend/schema/judgments.sql
       - outputs/ingest_manifest.json
     metrics:
       - outputs/build_edges_metrics.json:

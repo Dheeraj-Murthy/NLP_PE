@@ -36,7 +36,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, execute_values
 
 from citation_extractor import CitationExtractor  # also puts backend/ on sys.path
-from graph.schema import ensure_schema
+from db_schema import ensure_schema
 import tracking
 
 try:
