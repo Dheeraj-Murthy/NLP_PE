@@ -294,3 +294,11 @@ def chat_rename(session_id: str, title: str) -> None:
     except requests.RequestException as e:
         raise LegalRAGAPIError(str(e)) from e
     _handle_response(resp)
+
+
+def chat_delete(session_id: str) -> None:
+    try:
+        resp = requests.delete(_url(f"/chat/sessions/{session_id}"), timeout=DEFAULT_TIMEOUT)
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    _handle_response(resp)

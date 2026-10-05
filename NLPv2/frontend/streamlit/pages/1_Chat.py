@@ -65,6 +65,22 @@ st.session_state.setdefault("chats_shown", CHATS_PAGE)
 
 def _open_chat(session_id: str) -> None:
     st.query_params["chat"] = session_id
+    st.session_state.pop("confirm_delete", None)
+
+
+def _ask_delete(session_id: str) -> None:
+    st.session_state.confirm_delete = session_id
+
+
+def _delete_chat(session_id: str) -> None:
+    st.session_state.pop("confirm_delete", None)
+    try:
+        api_client.chat_delete(session_id)
+    except Exception as e:
+        st.session_state.delete_error = e
+        return
+    if session_id == st.query_params.get("chat"):
+        _start_new_chat()
 
 
 try:
@@ -90,15 +106,36 @@ with st.sidebar:
     elif not chats["items"]:
         st.caption("No chats yet — ask a question to start one.")
     else:
+        if "delete_error" in st.session_state:
+            render_api_error(st.session_state.pop("delete_error"))
         for c in chats["items"]:
-            st.button(
+            sid = c["session_id"]
+            if st.session_state.get("confirm_delete") == sid:
+                st.caption(f"Delete “{c['title']}” and all its messages?")
+                yes, no = st.columns(2)
+                yes.button("Delete", key=f"delete_yes_{sid}", on_click=_delete_chat, args=(sid,),
+                           type="primary", icon=":material/delete:", width="stretch")
+                no.button("Cancel", key=f"delete_no_{sid}", on_click=_ask_delete, args=(None,),
+                          width="stretch")
+                continue
+            open_col, delete_col = st.columns([6, 1], gap="small", vertical_alignment="center")
+            open_col.button(
                 c["title"],
-                key=f"open_chat_{c['session_id']}",
+                key=f"open_chat_{sid}",
                 on_click=_open_chat,
-                args=(c["session_id"],),
+                args=(sid,),
                 width="stretch",
-                type="secondary" if c["session_id"] == chat_id else "tertiary",
-                icon=":material/chat_bubble:" if c["session_id"] == chat_id else None,
+                type="secondary" if sid == chat_id else "tertiary",
+                icon=":material/chat_bubble:" if sid == chat_id else None,
+            )
+            delete_col.button(
+                "",
+                key=f"delete_chat_{sid}",
+                on_click=_ask_delete,
+                args=(sid,),
+                icon=":material/delete:",
+                type="tertiary",
+                help="Delete this chat",
             )
         if chats["total"] > len(chats["items"]):
             if st.button(f"Show more ({chats['total'] - len(chats['items'])})", width="stretch"):
@@ -114,13 +151,8 @@ with st.sidebar:
                     st.rerun()
                 except Exception as e:
                     render_api_error(e)
-            if st.button("Delete this chat", icon=":material/delete_sweep:", width="stretch"):
-                try:
-                    api_client.chat_clear(chat_id)
-                    _start_new_chat()
-                    st.rerun()
-                except Exception as e:
-                    render_api_error(e)
+            st.button("Delete this chat", icon=":material/delete_sweep:", width="stretch",
+                      on_click=_ask_delete, args=(chat_id,))
 
     with st.expander("Export / import", icon=":material/import_export:"):
         if chat_id:
