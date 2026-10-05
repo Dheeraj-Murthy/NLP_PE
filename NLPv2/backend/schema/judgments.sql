@@ -12,6 +12,15 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
+-- Fingerprint (sha256 of judgments.sql + statutes.sql) of the schema last
+-- applied. db_schema.py skips re-applying when it matches, so apps starting
+-- up don't take table locks while ingestion is writing.
+CREATE TABLE IF NOT EXISTS schema_version (
+    id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),   -- single row
+    sha256 TEXT NOT NULL,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 
 -- ===========================================================================
 -- Judgments

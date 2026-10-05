@@ -48,6 +48,10 @@ fi
 echo "Applying schema..."
 "${PSQL[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
 	-f "$SCHEMA_DIR/judgments.sql" -f "$SCHEMA_DIR/statutes.sql"
+# Same fingerprint as backend/db_schema.py, so apps don't re-apply it.
+FINGERPRINT="$(cat "$SCHEMA_DIR/judgments.sql" "$SCHEMA_DIR/statutes.sql" | sha256sum | cut -d' ' -f1)"
+"${PSQL[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 -q -c \
+	"INSERT INTO schema_version (sha256) VALUES ('$FINGERPRINT') ON CONFLICT (id) DO UPDATE SET sha256 = EXCLUDED.sha256, applied_at = now();"
 "${PSQL[@]}" -d "$DB_NAME" -c '\dt'
 
 echo "=== Database setup complete ==="
