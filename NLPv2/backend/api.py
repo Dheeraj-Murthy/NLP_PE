@@ -1,10 +1,12 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
+from fastapi import Body, FastAPI, HTTPException, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from typing import Optional, List, Dict, Any
 import tempfile
 import os
 
 from rag_pipeline import LegalRAGPipeline
+from chat_store import is_valid_session_id
 from retrieval.citation_graph import CitationGraphManager
 
 app = FastAPI(
@@ -84,17 +86,27 @@ async def chat_legal(
     model: Optional[str] = Form(None),
     external_ok: bool = Form(False),
     api_key: Optional[str] = Form(None),
+    session_id: Optional[str] = Form(None),
 ):
+    """session_id: an ID from an earlier response to continue that
+    conversation, "new" to start one (the response carries its ID), or
+    omitted for the shared default conversation."""
     if not pipeline:
         raise HTTPException(status_code=500, detail="Pipeline not initialized")
 
     if _requires_external_ok(model) and not external_ok:
         raise HTTPException(status_code=400, detail="External model requires external_ok=true")
 
+    if session_id == "new":
+        session_id = pipeline.new_chat_session()
+    else:
+        session_id = _checked_session_id(session_id)
+
     try:
         result = pipeline.chat(
             user_message=message, include_debug_info=include_debug,
             model=model, external_ok=external_ok, api_key=api_key,
+            session_id=session_id,
         )
 
         return {"success": True, "data": result}
@@ -135,22 +147,106 @@ async def list_openai_models(api_key: str = Form(...)):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def _checked_session_id(session_id: Optional[str]) -> Optional[str]:
+    if session_id is not None and not is_valid_session_id(session_id):
+        raise HTTPException(status_code=400, detail="Invalid session_id")
+    return session_id
+
+
 @app.post("/chat/clear")
-async def clear_chat():
+async def clear_chat(session_id: Optional[str] = Form(None)):
+    """Delete one conversation (or the shared default one if no session_id)."""
     if not pipeline:
         raise HTTPException(status_code=500, detail="Pipeline not initialized")
 
-    pipeline.clear_chat_history()
+    pipeline.clear_chat_history(_checked_session_id(session_id))
     return {"success": True, "message": "Chat history cleared"}
 
 
 @app.get("/chat/history")
-async def get_chat_history():
+async def get_chat_history(session_id: Optional[str] = None):
+    """A conversation's messages, oldest first (the shared default one if no session_id)."""
     if not pipeline:
         raise HTTPException(status_code=500, detail="Pipeline not initialized")
 
-    history = pipeline.get_chat_history()
+    history = pipeline.get_chat_history(_checked_session_id(session_id))
     return {"success": True, "data": history}
+
+
+@app.get("/chat/sessions")
+async def list_chat_sessions(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
+    """All chats with at least one message, most recently active first.
+    No authorisation yet: every chat is listed."""
+    if not pipeline:
+        raise HTTPException(status_code=500, detail="Pipeline not initialized")
+
+    return {"success": True, "data": pipeline.list_chat_sessions(limit=limit, offset=offset)}
+
+
+@app.post("/chat/sessions")
+async def create_chat_session():
+    """Start an empty chat; send its session_id with /chat to use it."""
+    if not pipeline:
+        raise HTTPException(status_code=500, detail="Pipeline not initialized")
+
+    return {"success": True, "data": {"session_id": pipeline.new_chat_session()}}
+
+
+@app.patch("/chat/sessions/{session_id}")
+async def rename_chat_session(session_id: str, body: Dict[str, Any] = Body(...)):
+    """Rename a chat: body {"title": "..."}."""
+    if not pipeline:
+        raise HTTPException(status_code=500, detail="Pipeline not initialized")
+    _checked_session_id(session_id)
+    title = body.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise HTTPException(status_code=422, detail="title must be a non-empty string")
+
+    if not pipeline.rename_chat_session(session_id, title):
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return {"success": True}
+
+
+@app.delete("/chat/sessions/{session_id}")
+async def delete_chat_session(session_id: str):
+    """Delete a chat and all its messages."""
+    if not pipeline:
+        raise HTTPException(status_code=500, detail="Pipeline not initialized")
+
+    pipeline.clear_chat_history(_checked_session_id(session_id))
+    return {"success": True}
+
+
+@app.get("/chat/export")
+async def export_chat(
+    session_id: Optional[str] = None,
+    format: str = "json",
+):
+    """A conversation as JSON (messages, cited documents and running
+    summary — import it to continue anywhere) or a readable Markdown
+    transcript."""
+    if not pipeline:
+        raise HTTPException(status_code=500, detail="Pipeline not initialized")
+    if format not in ("json", "markdown"):
+        raise HTTPException(status_code=422, detail="format must be json or markdown")
+
+    exported = pipeline.export_chat(_checked_session_id(session_id), fmt=format)
+    if format == "markdown":
+        return PlainTextResponse(exported, media_type="text/markdown")
+    return {"success": True, "data": exported}
+
+
+@app.post("/chat/import")
+async def import_chat(conversation: Dict[str, Any] = Body(...)):
+    """Start a new conversation from a JSON export; returns its session_id."""
+    if not pipeline:
+        raise HTTPException(status_code=500, detail="Pipeline not initialized")
+
+    try:
+        session_id = pipeline.import_chat(conversation)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return {"success": True, "data": {"session_id": session_id}}
 
 
 @app.post("/document")

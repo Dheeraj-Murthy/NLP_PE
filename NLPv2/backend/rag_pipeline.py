@@ -12,6 +12,28 @@ from retrieval.reranker import CrossEncoderReranker
 from document_processor import DocumentProcessor
 from retrieval.citation_graph import CitationGraphManager
 from tracking import log_query_run
+from chat_store import ChatStore, DEFAULT_SESSION
+from chat_context import (
+    SUMMARY_SYSTEM_PROMPT,
+    batches_for_summary,
+    carried_documents,
+    cited_documents,
+    context_window,
+    display_history,
+    export_conversation,
+    export_markdown,
+    fits,
+    parse_import,
+    history_budget,
+    prompt_history,
+    retrieval_query,
+    split_for_summary,
+    summary_request,
+    summary_system_note,
+)
+
+# Extra room in the context block for documents cited earlier in a chat.
+CARRIED_DOCUMENT_TOKENS = 1200
 
 DEFAULT_QWEN_MODEL = "Qwen/Qwen2.5-7B-Instruct-1M"
 
@@ -128,7 +150,10 @@ class LegalRAGPipeline:
 
         self.post_processor = PostProcessor()
         self.document_processor = DocumentProcessor()
-        self.chat_session = ChatSession(max_history=10)
+        # Conversations, one per session ID, kept in Postgres (see chat_store.py).
+        # How much of each the model sees depends on its context window
+        # (chat_context.context_window); older turns get summarised to fit.
+        self.chat_store = ChatStore(self.retriever.db_connection_string)
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
         self.graph_boost = graph_boost
@@ -593,8 +618,16 @@ class LegalRAGPipeline:
         model: Optional[str] = None,
         external_ok: bool = False,
         api_key: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Multi-turn chat with conversation history."""
+        """Multi-turn chat. Each session_id is its own conversation; None
+        uses the shared default session. The model sees the whole
+        conversation while it fits its context window, with the oldest turns
+        summarised once it doesn't; documents cited in recent answers are
+        shown again; follow-up questions are retrieved together with the
+        topic of the previous question. Works the same whichever model
+        answers each turn."""
+        session_id = session_id or DEFAULT_SESSION
         try:
             backend = self._resolve_backend(model, external_ok, api_key)
         except (PrivacyGateError, RuntimeError, ValueError) as e:
@@ -603,35 +636,50 @@ class LegalRAGPipeline:
                 "answer": None,
                 "answer_found": False,
                 "confidence": 0.0,
+                "session_id": session_id,
             }
 
-        self.chat_session.add_user_message(user_message)
+        prior = self.chat_store.messages(session_id)
+        search_query = retrieval_query(user_message, prior)
+        self.chat_store.add_message(
+            session_id, "user", user_message, retrieval_query=search_query
+        )
+
+        def history_for_display() -> List[Dict[str, Any]]:
+            return display_history(self.chat_store.messages(session_id))
 
         start_time = time.time()
 
         try:
             retrieval_start = time.time()
             judgment_candidates = self.retriever.retrieve_judgment_candidates(
-                query=user_message,
+                query=search_query,
                 candidate_k=self.stage1_k,
                 similarity_threshold=self.stage1_threshold,
                 graph_boost=self.graph_boost,
             )
             statute_candidates = self.retriever.retrieve_statute_candidates(
-                query=user_message,
+                query=search_query,
                 candidate_k=self.statute_candidate_k,
                 similarity_threshold=self.statute_similarity_threshold,
             )
-            reranked_statutes = self._rerank_statutes(user_message, statute_candidates)
+            reranked_statutes = self._rerank_statutes(search_query, statute_candidates)
             reranked_judgments = self.reranker.rerank(
-                user_message, judgment_candidates, top_n=self.stage2_k
+                search_query, judgment_candidates, top_n=self.stage2_k
             )
             retrieved_chunks = reranked_statutes + reranked_judgments
+            # Documents the conversation already relied on, after this turn's
+            # results so their [n] numbers don't shift the new ones.
+            carried = carried_documents(prior, retrieved_chunks)
+            retrieved_chunks = retrieved_chunks + carried
             retrieval_time = time.time() - retrieval_start
 
             if not retrieved_chunks:
                 no_answer = "I couldn't find relevant legal cases for your query. Could you try rephrasing?"
-                self.chat_session.add_assistant_message(no_answer, [], 0.0)
+                self.chat_store.add_message(
+                    session_id, "assistant", no_answer,
+                    details={"citations": [], "confidence": 0.0},
+                )
                 return {
                     "answer": no_answer,
                     "answer_found": False,
@@ -640,27 +688,43 @@ class LegalRAGPipeline:
                     "sources": [],
                     "citations_by_type": {},
                     "sources_by_type": {},
-                    "conversation_history": self.chat_session.get_history(
-                        include_citations=True
-                    ),
+                    "session_id": session_id,
+                    "conversation_history": history_for_display(),
                     "metrics": self._build_metrics(
                         None, retrieval_time, 0.0, time.time() - start_time, 0
                     ),
                 }
 
-            # Exclude the current user turn (just appended above) from history —
-            # it's passed to generate() separately as user_query.
-            history = self.chat_session.get_history()[:-1]
-
             context_block = self.prompt_builder.build_context_block(
-                retrieved_chunks, token_counter=backend.count_tokens
+                retrieved_chunks,
+                token_counter=backend.count_tokens,
+                max_tokens=self.prompt_builder.max_context_tokens
+                + (CARRIED_DOCUMENT_TOKENS if carried else 0),
             )
+
+            # Earlier turns only — the current message goes to generate()
+            # separately as user_query.
+            window = context_window(backend.model_id)
+            fixed_tokens = sum(
+                backend.count_tokens(t)
+                for t in (self.prompt_builder.SYSTEM_PROMPT, context_block, user_message)
+            )
+            history, summary, summarized = self._conversation_context(
+                session_id,
+                prior,
+                backend,
+                history_budget(window, fixed_tokens, self.max_new_tokens),
+                window,
+            )
+            system_prompt = self.prompt_builder.SYSTEM_PROMPT
+            if summary:
+                system_prompt += summary_system_note(summary)
 
             generation_start = time.time()
             gen = backend.generate(
                 context_block=context_block,
                 user_query=user_message,
-                system_prompt=self.prompt_builder.SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 conversation_history=history,
                 max_new_tokens=self.max_new_tokens,
             )
@@ -675,8 +739,32 @@ class LegalRAGPipeline:
             formatted_answer = self.post_processor.format_response_with_citations(
                 processed
             )
-            self.chat_session.add_assistant_message(
-                formatted_answer, processed.citations, processed.confidence_score
+            metrics = self._build_metrics(
+                gen, retrieval_time, generation_time, total_time,
+                len(retrieved_chunks),
+            )
+            context_info = {
+                "model_context_tokens": window,
+                "history_messages": len(history),
+                "summarized_messages": summarized,
+                "carried_documents": len(carried),
+            }
+            self.chat_store.add_message(
+                session_id,
+                "assistant",
+                formatted_answer,
+                prompt_text=processed.answer,
+                details={
+                    "citations": processed.citations,
+                    "sources": processed.sources,
+                    "citations_by_type": processed.citations_by_type,
+                    "sources_by_type": processed.sources_by_type,
+                    "confidence": processed.confidence_score,
+                    "model_id": metrics.get("model_id"),
+                    "model_version": metrics.get("model_version"),
+                    "cited_documents": cited_documents(gen.text, retrieved_chunks),
+                    "context": context_info,
+                },
             )
 
             result = {
@@ -687,13 +775,10 @@ class LegalRAGPipeline:
                 "sources": processed.sources,
                 "citations_by_type": processed.citations_by_type,
                 "sources_by_type": processed.sources_by_type,
-                "conversation_history": self.chat_session.get_history(
-                    include_citations=True
-                ),
-                "metrics": self._build_metrics(
-                    gen, retrieval_time, generation_time, total_time,
-                    len(retrieved_chunks),
-                ),
+                "session_id": session_id,
+                "conversation_history": history_for_display(),
+                "context": context_info,
+                "metrics": metrics,
             }
 
             if include_debug_info:
@@ -701,6 +786,8 @@ class LegalRAGPipeline:
                     "retrieved_chunks": retrieved_chunks[:3],
                     "raw_response": gen.text,
                     "conversation_history": history,
+                    "retrieval_query": search_query,
+                    "conversation_summary": summary,
                 }
 
             log_query_run(
@@ -711,7 +798,14 @@ class LegalRAGPipeline:
                     "similarity_threshold": self.similarity_threshold,
                     "graph_boost": self.graph_boost,
                 },
-                metrics={**result["metrics"], "confidence": result["confidence"]},
+                metrics={
+                    **result["metrics"],
+                    "confidence": result["confidence"],
+                    "history_turns": len(history),
+                    "summarized_messages": summarized,
+                    "carried_documents": len(carried),
+                    "follow_up": int(search_query != user_message),
+                },
             )
 
             return result
@@ -722,16 +816,112 @@ class LegalRAGPipeline:
                 "answer": None,
                 "answer_found": False,
                 "confidence": 0.0,
-                "conversation_history": self.chat_session.get_history(
-                    include_citations=True
-                ),
+                "session_id": session_id,
+                "conversation_history": history_for_display(),
             }
 
-    def clear_chat_history(self):
-        self.chat_session.clear()
+    def _conversation_context(
+        self,
+        session_id: str,
+        prior: List[Dict[str, Any]],
+        backend: LLMBackend,
+        budget: int,
+        window: int,
+    ):
+        """(history for the model, summary or None, number of messages the
+        summary covers). The whole conversation if it fits `budget`;
+        otherwise older turns are folded into the stored running summary,
+        made by this turn's model, and only recent turns go verbatim. If
+        summarising fails, the oldest turns are dropped instead so the
+        answer still goes through."""
+        count = backend.count_tokens
+        if fits(prior, count, budget):
+            # Everything fits (e.g. after switching to a larger model): the
+            # whole conversation word for word, no summary needed.
+            return prompt_history(prior, count, budget), None, 0
 
-    def get_chat_history(self) -> List[Dict[str, Any]]:
-        return self.chat_session.get_history(include_citations=True)
+        stored = self.chat_store.summary(session_id)
+        summary, upto = stored["summary"], stored["upto"]
+        pending = [m for m in prior if m["message_id"] > upto]
+
+        if not fits(pending, count, budget, summary):
+            to_summarise, keep = split_for_summary(pending, count, budget)
+            if to_summarise:
+                try:
+                    summary = self._summarise(
+                        backend, summary, to_summarise, window,
+                        max_tokens=min(1024, max(256, budget // 4)),
+                    )
+                    upto = to_summarise[-1]["message_id"]
+                    self.chat_store.set_summary(session_id, summary, upto)
+                    pending = keep
+                except Exception as err:
+                    print(f"Warning: could not summarise chat {session_id}: {err}")
+
+        summary_tokens = count(summary) + 20 if summary else 0
+        history = prompt_history(pending, count, max(0, budget - summary_tokens))
+        summarized = sum(1 for m in prior if m["message_id"] <= upto) if summary else 0
+        return history, summary, summarized
+
+    def _summarise(
+        self,
+        backend: LLMBackend,
+        previous: Optional[str],
+        messages: List[Dict[str, Any]],
+        window: int,
+        max_tokens: int,
+    ) -> str:
+        """Fold messages into the running summary, in as many model calls as
+        the window needs."""
+        summary = previous
+        for batch in batches_for_summary(messages, backend.count_tokens, max(1000, window // 2)):
+            gen = backend.generate(
+                context_block="",
+                user_query=summary_request(summary, batch),
+                system_prompt=SUMMARY_SYSTEM_PROMPT,
+                conversation_history=None,
+                max_new_tokens=max_tokens,
+            )
+            text = (gen.text or "").strip()
+            if not text:
+                raise RuntimeError("model returned an empty summary")
+            summary = text
+        return summary
+
+    def export_chat(self, session_id: Optional[str] = None, fmt: str = "json"):
+        """The conversation as a portable JSON dict, or Markdown text."""
+        session_id = session_id or DEFAULT_SESSION
+        messages = self.chat_store.messages(session_id)
+        if fmt == "markdown":
+            return export_markdown(messages)
+        exported = export_conversation(session_id, messages, self.chat_store.summary(session_id))
+        info = self.chat_store.session_info(session_id)
+        exported["title"] = info["title"] if info else None
+        return exported
+
+    def import_chat(self, data: Dict[str, Any]) -> str:
+        """Start a new session from an exported conversation; returns its ID.
+        Raises ValueError for a malformed export."""
+        messages, summary, covers = parse_import(data)
+        title = data.get("title") if isinstance(data.get("title"), str) else None
+        return self.chat_store.import_session(messages, summary, covers, title=title)
+
+    def list_chat_sessions(self, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+        """Chats, most recently active first."""
+        return self.chat_store.list_sessions(limit=limit, offset=offset)
+
+    def rename_chat_session(self, session_id: str, title: str) -> bool:
+        return self.chat_store.rename(session_id, title)
+
+    def new_chat_session(self) -> str:
+        return self.chat_store.new_session()
+
+    def clear_chat_history(self, session_id: Optional[str] = None):
+        self.chat_store.clear(session_id or DEFAULT_SESSION)
+
+    def get_chat_history(self, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        return display_history(self.chat_store.messages(session_id or DEFAULT_SESSION))
+
 
     def test_retrieval_only(self, query: str) -> Dict[str, Any]:
         try:
