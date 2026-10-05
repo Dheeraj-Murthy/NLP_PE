@@ -17,6 +17,9 @@ from tqdm import tqdm
 # to sys.path to reuse tracking.py's MLflow setup instead of duplicating it.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 import tracking
+from graph.citation_resolver import extract_citation_header, parse_reporter_citations
+from db_schema import ensure_schema
+from documents import relative_source_path
 
 # Initialize local embedding model
 try:
@@ -229,6 +232,16 @@ def parse_judgment_metadata(text: str, filename: str) -> Dict[str, Any]:
         except Exception:
             pass
 
+    # The judgment's own reporter citations, from its JUDIS "CITATION:" header
+    # (e.g. "1953 AIR 75  1953 SCR 215"). Edge building reads the same header
+    # from the stored text, so this column is informational.
+    citation_header = extract_citation_header(text)
+    if citation_header:
+        metadata['citations'] = {
+            'header': citation_header,
+            'reporters': [c.raw for c in parse_reporter_citations(citation_header)],
+        }
+
     bench_pattern = r'BENCH:\s*\[?([^\]\n]+)'
     bench_match = re.search(bench_pattern, text)
     bench_text = bench_match.group(1).strip() if bench_match else fallback_bench_text
@@ -436,8 +449,9 @@ def ingest_judgment_from_pdf(pdf_path: str, conn) -> Dict[str, Any]:
         cur.execute(
             """
             INSERT INTO judgments
-                (petitioner, respondent, court, date_of_judgment, bench, citations, judgment_text)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (petitioner, respondent, court, date_of_judgment, bench, citations, judgment_text,
+                 source_file)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -448,6 +462,8 @@ def ingest_judgment_from_pdf(pdf_path: str, conn) -> Dict[str, Any]:
                 metadata['bench'],
                 json.dumps(metadata['citations']),
                 text,           # <-- clean text
+                # Where the original PDF lives, so citations can link to it.
+                relative_source_path(pdf_path),
             )
         )
 
@@ -551,6 +567,7 @@ def main():
         user=os.environ.get("DB_USER", "postgres"),
         password=os.environ.get("DB_PASSWORD", "postgres"),
     )
+    ensure_schema(conn)
     start_time = time.time()
     try:
         successful = 0

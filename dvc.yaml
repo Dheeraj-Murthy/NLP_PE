@@ -11,3 +11,32 @@ stages:
     metrics:
       - outputs/ingest_manifest.json:
           cache: false
+
+  # Resolves citations into citation_edges (full rebuild, one transaction).
+  # Depends on the ingest manifest so it reruns after every ingestion.
+  build_edges:
+    wdir: NLPv2/ingestion
+    cmd: python build_citation_edges.py --rebuild
+    deps:
+      - build_citation_edges.py
+      - citation_extractor.py
+      - ../backend/graph/citation_resolver.py
+      - ../backend/schema/judgments.sql
+      - outputs/ingest_manifest.json
+    metrics:
+      - outputs/build_edges_metrics.json:
+          cache: false
+    outs:
+      - outputs/edge_review_sample.csv:
+          cache: false
+
+  # PageRank and degrees into judgment_graph_stats, read by the API.
+  graph_stats:
+    wdir: NLPv2/ingestion
+    cmd: python compute_graph_stats.py
+    deps:
+      - compute_graph_stats.py
+      - outputs/build_edges_metrics.json
+    metrics:
+      - outputs/graph_stats_metrics.json:
+          cache: false

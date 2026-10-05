@@ -1,8 +1,17 @@
 """
 Citation Graph Manager for Legal RAG
 
-Uses NetworkX and PostgreSQL to manage directed precedent graphs,
-calculate PageRank / centrality scores, and extract subgraphs for visual APIs.
+Serves the directed precedent graph: subgraphs for visual APIs, landmark
+cases, precedent chains, PageRank / centrality scores, search and citation
+resolution.
+
+Two modes, same public methods and return shapes:
+  - "postgres" (default): indexed queries against citation_edges and the
+    precomputed judgment_graph_stats table (see graph/pg_store.py). Nothing
+    is held in memory, so it scales with the corpus and needs no reload.
+  - "memory": the original approach, the whole graph loaded into NetworkX.
+    Used when GRAPH_BACKEND=memory, or when a caller fills `self.graph`
+    itself and sets `_is_loaded` (as the smoke tests do).
 """
 
 import os
@@ -10,6 +19,8 @@ from typing import Dict, List, Any, Optional
 import networkx as nx
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+from graph.pg_store import PostgresGraphStore
 
 try:
     from dotenv import load_dotenv
@@ -19,7 +30,8 @@ except ImportError:
 
 
 class CitationGraphManager:
-    """Manages the in-memory NetworkX citation graph synchronized with PostgreSQL."""
+    """Citation graph queries, backed by PostgreSQL (default) or an in-memory
+    NetworkX copy of it."""
 
     def __init__(
         self,
@@ -28,6 +40,7 @@ class CitationGraphManager:
         db_name: Optional[str] = None,
         db_user: Optional[str] = None,
         db_password: Optional[str] = None,
+        backend: Optional[str] = None,
     ):
         self.db_host = db_host or os.getenv("DB_HOST", "localhost")
         # 5433 matches retriever.py's default and the docker-compose host port
@@ -39,6 +52,22 @@ class CitationGraphManager:
 
         self.graph = nx.DiGraph()
         self._is_loaded = False
+        self._pagerank_cache: Optional[tuple] = None
+
+        self.backend = (backend or os.getenv("GRAPH_BACKEND", "postgres")).lower()
+        self._pg = PostgresGraphStore(
+            {
+                "host": self.db_host,
+                "port": self.db_port,
+                "dbname": self.db_name,
+                "user": self.db_user,
+                "password": self.db_password,
+            }
+        )
+
+    def _use_postgres(self) -> bool:
+        # A graph someone loaded or filled in memory always wins.
+        return self.backend != "memory" and not self._is_loaded
 
     def _get_connection(self):
         return psycopg2.connect(
@@ -49,7 +78,7 @@ class CitationGraphManager:
             password=self.db_password,
         )
 
-    def load_graph_from_db(self, force_reload: bool = False) -> int:
+    def _mem_load(self, force_reload: bool = False) -> int:
         """
         Load nodes and edges from PostgreSQL into NetworkX.
         Returns total number of edges loaded.
@@ -101,7 +130,7 @@ class CitationGraphManager:
 
         return self.graph.number_of_edges()
 
-    def get_subgraph(
+    def _mem_subgraph(
         self, judgment_id: int, depth: int = 2, max_nodes: int = 100
     ) -> Dict[str, Any]:
         """
@@ -114,7 +143,7 @@ class CitationGraphManager:
         level, the most-connected ones win. Since every hop level is kept in
         full before the next one is touched, the result stays connected.
         """
-        self.load_graph_from_db()
+        self._mem_load()
 
         if judgment_id not in self.graph:
             return {
@@ -168,11 +197,11 @@ class CitationGraphManager:
             "truncated": truncated,
         }
 
-    def get_landmark_cases(self, limit: int = 10) -> List[Dict[str, Any]]:
+    def _mem_landmark_cases(self, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Identify top authority cases based on PageRank and in-degree centrality.
         """
-        self.load_graph_from_db()
+        self._mem_load()
 
         if self.graph.number_of_nodes() == 0:
             return []
@@ -199,27 +228,31 @@ class CitationGraphManager:
         landmarks.sort(key=lambda x: (x["pagerank_score"], x["in_degree"]), reverse=True)
         return landmarks[:limit]
 
-    def get_shortest_path(self, source_id: int, target_id: int) -> Optional[List[int]]:
+    def _mem_shortest_path(self, source_id: int, target_id: int) -> Optional[List[int]]:
         """
         Find shortest citation chain between source and target judgments.
         """
-        self.load_graph_from_db()
+        self._mem_load()
 
         try:
             return nx.shortest_path(self.graph, source=source_id, target=target_id)
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return None
 
-    def get_centrality_scores(self) -> Dict[int, float]:
+    def _mem_centrality_scores(self) -> Dict[int, float]:
         """
         Return normalized PageRank scores for all judgments (used for retrieval boosting).
         """
-        self.load_graph_from_db()
+        self._mem_load()
         if self.graph.number_of_nodes() == 0 or self.graph.number_of_edges() == 0:
             return {}
-        return nx.pagerank(self.graph)
+        # Cached per graph size: retrieval asks for this on every query.
+        shape = (self.graph.number_of_nodes(), self.graph.number_of_edges())
+        if self._pagerank_cache is None or self._pagerank_cache[0] != shape:
+            self._pagerank_cache = (shape, nx.pagerank(self.graph))
+        return self._pagerank_cache[1]
 
-    def get_precedent_summary(
+    def _mem_precedent_summary(
         self, judgment_id: int, top_n: int = 3
     ) -> Optional[Dict[str, Any]]:
         """
@@ -227,7 +260,7 @@ class CitationGraphManager:
         how many cases cite it, and the strongest precedents followed/applied
         later. Returns None if the judgment is not in the graph.
         """
-        self.load_graph_from_db()
+        self._mem_load()
         if judgment_id not in self.graph:
             return None
 
@@ -274,3 +307,151 @@ class CitationGraphManager:
             "cites": out_citations[:top_n],
             "cited_by": in_citations[:top_n],
         }
+
+    def _mem_neighbors(
+        self, judgment_id: int, direction: str, relationship: Optional[str], limit: int, offset: int
+    ) -> Optional[Dict[str, Any]]:
+        self._mem_load()
+        if judgment_id not in self.graph:
+            return None
+        edges = (
+            self.graph.out_edges(judgment_id, data=True)
+            if direction == "cites"
+            else self.graph.in_edges(judgment_id, data=True)
+        )
+        scores = self._mem_centrality_scores()
+        items = []
+        for src, tgt, data in edges:
+            other = tgt if direction == "cites" else src
+            rel = data.get("relationship", "cited")
+            if other == judgment_id or (relationship and rel != relationship):
+                continue
+            node = self.graph.nodes[other]
+            items.append(
+                {
+                    "judgment_id": other,
+                    "label": node.get("label", f"Case #{other}"),
+                    "court": node.get("court"),
+                    "date": node.get("date"),
+                    "relationship": rel,
+                    "cited_text": data.get("cited_text", ""),
+                    "pagerank_score": round(scores.get(other, 0.0), 6),
+                }
+            )
+        items.sort(key=lambda i: (-i["pagerank_score"], i["judgment_id"]))
+        return {
+            "judgment_id": judgment_id,
+            "direction": direction,
+            "total": len(items),
+            "limit": limit,
+            "offset": offset,
+            "items": items[offset : offset + limit],
+        }
+
+    # ------------------------------------------------------------------
+    # Public API — same names, arguments and return shapes in both modes.
+    # ------------------------------------------------------------------
+
+    def load_graph_from_db(self, force_reload: bool = False) -> int:
+        """
+        Memory mode: load nodes and edges from PostgreSQL into NetworkX.
+        Postgres mode: nothing to load; checks the connection.
+        Returns the number of (distinct) citation edges.
+        """
+        if not self._use_postgres():
+            return self._mem_load(force_reload)
+        try:
+            return self._pg.edge_count()
+        except Exception as err:
+            print(f"Warning: Failed to reach citation graph in DB: {err}")
+            return 0
+
+    def get_subgraph(
+        self, judgment_id: int, depth: int = 2, max_nodes: int = 100
+    ) -> Dict[str, Any]:
+        """
+        N-hop ego graph around a judgment, capped at max_nodes (closest
+        nodes first, then the most important). Returns nodes, edges,
+        total_nodes and truncated.
+        """
+        if self._use_postgres():
+            return self._pg.subgraph(judgment_id, depth=depth, max_nodes=max_nodes)
+        return self._mem_subgraph(judgment_id, depth=depth, max_nodes=max_nodes)
+
+    def get_landmark_cases(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Top authority cases by PageRank, then in-degree."""
+        if self._use_postgres():
+            return self._pg.landmark_cases(limit=limit)
+        return self._mem_landmark_cases(limit=limit)
+
+    def get_shortest_path(self, source_id: int, target_id: int) -> Optional[List[int]]:
+        """Shortest citation chain from source to target, or None."""
+        if self._use_postgres():
+            return self._pg.shortest_path(source_id, target_id)
+        return self._mem_shortest_path(source_id, target_id)
+
+    def get_centrality_scores(self) -> Dict[int, float]:
+        """PageRank for every judgment with a non-zero score (retrieval boosting)."""
+        if self._use_postgres():
+            try:
+                return self._pg.all_scores()
+            except Exception as err:
+                print(f"Warning: centrality scores unavailable: {err}")
+                return {}
+        return self._mem_centrality_scores()
+
+    def centrality_for(self, judgment_ids: List[int]) -> Dict[int, float]:
+        """PageRank for just these judgments — what retrieval needs per query,
+        without building the full map."""
+        ids = [i for i in dict.fromkeys(judgment_ids) if i is not None]
+        if self._use_postgres():
+            try:
+                return self._pg.scores_for(ids)
+            except Exception as err:
+                print(f"Warning: centrality scores unavailable: {err}")
+                return {}
+        scores = self._mem_centrality_scores()
+        return {i: scores[i] for i in ids if i in scores}
+
+    def get_precedent_summary(
+        self, judgment_id: int, top_n: int = 3
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Compact precedent-chain summary for a judgment: how many cases it
+        cites, how many cite it, and the strongest of each. None if the
+        judgment is not in the graph.
+        """
+        if self._use_postgres():
+            try:
+                return self._pg.precedent_summary(judgment_id, top_n=top_n)
+            except Exception as err:
+                # Answering a query must not fail because the graph is unavailable.
+                print(f"Warning: precedent summary unavailable: {err}")
+                return None
+        return self._mem_precedent_summary(judgment_id, top_n=top_n)
+
+    def get_neighbors(
+        self,
+        judgment_id: int,
+        direction: str = "cites",
+        relationship: Optional[str] = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> Optional[Dict[str, Any]]:
+        """One page of the cases a judgment cites (direction="cites") or that
+        cite it ("cited_by"), most important first. None if it doesn't exist."""
+        if direction not in ("cites", "cited_by"):
+            raise ValueError("direction must be 'cites' or 'cited_by'")
+        if self._use_postgres():
+            return self._pg.neighbors(judgment_id, direction, relationship, limit, offset)
+        return self._mem_neighbors(judgment_id, direction, relationship, limit, offset)
+
+    def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Cases matching an ID, a reporter citation or a case name. Always
+        queries PostgreSQL, in either mode."""
+        return self._pg.search(query, limit=limit)
+
+    def resolve_citations(self, citations: List[str]) -> List[Dict[str, Any]]:
+        """Resolve citation strings to judgment IDs, exactly as edge building
+        does. Always queries PostgreSQL, in either mode."""
+        return self._pg.resolve(citations)

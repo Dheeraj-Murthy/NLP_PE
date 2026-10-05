@@ -29,6 +29,8 @@ from dotenv import load_dotenv
 # to sys.path to reuse tracking.py's MLflow setup instead of duplicating it.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 import tracking
+from db_schema import ensure_schema
+from documents import relative_source_path
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -54,19 +56,8 @@ def get_conn(dsn: Optional[str] = None):
     return psycopg2.connect(dsn or _default_dsn())
 
 
-def create_tables(conn):
-    """Run statute_schema.sql if tables don't exist."""
-    cur = conn.cursor()
-    schema_path = Path(__file__).parent / "schema" / "statute_schema.sql"
-    if not schema_path.exists():
-        print(f"⚠ statute_schema.sql not found at {schema_path}")
-        return
-    cur.execute(open(schema_path).read())
-    conn.commit()
-    print("✓ Statute tables ready")
-
-
-def upsert_statute(cur, title: str, short_title: str, year: int) -> int:
+def upsert_statute(cur, title: str, short_title: str, year: int,
+                   source_file: Optional[str] = None) -> int:
     """Insert statute row; return id (reuses existing row by title).
 
     statutes.title has no UNIQUE constraint, so `ON CONFLICT DO NOTHING`
@@ -78,12 +69,14 @@ def upsert_statute(cur, title: str, short_title: str, year: int) -> int:
     cur.execute("SELECT id FROM statutes WHERE title=%s", (title,))
     row = cur.fetchone()
     if row:
+        if source_file:
+            cur.execute("UPDATE statutes SET source_file=%s WHERE id=%s", (source_file, row[0]))
         return row[0]
     cur.execute(
-        """INSERT INTO statutes (title, short_title, year)
-           VALUES (%s, %s, %s)
+        """INSERT INTO statutes (title, short_title, year, source_file)
+           VALUES (%s, %s, %s, %s)
            RETURNING id""",
-        (title, short_title, year),
+        (title, short_title, year, source_file),
     )
     return cur.fetchone()[0]
 
@@ -240,7 +233,8 @@ def ingest_one(pdf_path: Path, *, layout: bool, title: str, short_title: str,
 
     # Batch insert
     cur = conn.cursor()
-    statute_id = upsert_statute(cur, title, short_title, year)
+    statute_id = upsert_statute(cur, title, short_title, year,
+                                source_file=relative_source_path(str(pdf_path)))
     print(f"  statute_id = {statute_id}")
 
     BATCH_SIZE = 500
@@ -326,7 +320,7 @@ def main():
 
     start_time = time.time()
     try:
-        create_tables(conn)
+        ensure_schema(conn)
         total_parsed = 0
         total_embedded = 0
         total_inserted = 0

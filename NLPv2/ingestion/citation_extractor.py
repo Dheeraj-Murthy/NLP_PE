@@ -6,21 +6,26 @@ matching citations against existing DB judgments to construct directed graph edg
 """
 
 import re
+import sys
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
+
+# backend/ is a sibling directory holding the shared resolver (same pattern as ingest.py).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
+from graph.citation_resolver import REPORTER_PATTERNS, CitationResolver
 
 
 class CitationExtractor:
     """Extracts precedent citations and case relationships from legal judgment text."""
 
-    # Common Indian legal citation formats
-    CITATION_PATTERNS = [
-        # Reporter citations: AIR 1987 SC 1086, (1992) 1 SCC 588, [1995] 3 SCR 12
-        r"(?:AIR\s+\d{4}\s+SC\s+\d+)",
-        r"(?:\(\d{4}\)\s+\d+\s+SCC\s+\d+)",
-        r"(?:\[\d{4}\]\s+\d+\s+SCR\s+\d+)",
-        # Case title citations: Petitioner v[s]. Respondent (Year)
-        r"([A-Z][A-Za-z0-9\.\s\&]+\s+(?:v\.|vs\.|Versus)\s+[A-Z][A-Za-z0-9\.\s\&]+(?:\s*\(\d{4}\))?)",
-    ]
+    # Case title citations: Petitioner v[s]. Respondent (Year)
+    CASE_TITLE_PATTERN = (
+        r"([A-Z][A-Za-z0-9\.\s\&]+\s+(?:v\.|vs\.|Versus)\s+[A-Z][A-Za-z0-9\.\s\&]+(?:\s*\(\d{4}\))?)"
+    )
+    # Reporter citations (AIR 1987 SC 1086, [1950] S.C.R. 940, (1992) 1 SCC 588,
+    # A.I.R. 1953 S.C. 75, ...) come from the shared resolver, so extraction and
+    # resolution agree on every format; then case titles.
+    CITATION_PATTERNS = [p.pattern for p in REPORTER_PATTERNS] + [CASE_TITLE_PATTERN]
 
     # Keyword patterns for determining relationship type
     RELATIONSHIP_PATTERNS = {
@@ -31,26 +36,18 @@ class CitationExtractor:
     }
 
     def __init__(self):
-        self.compiled_citation_res = [
-            re.compile(p, re.IGNORECASE) for p in self.CITATION_PATTERNS
+        # Reporter patterns are case-sensitive ("AIR", not "air"); case titles aren't.
+        self.compiled_reporter_res = list(REPORTER_PATTERNS)
+        self.compiled_citation_res = self.compiled_reporter_res + [
+            re.compile(self.CASE_TITLE_PATTERN, re.IGNORECASE)
         ]
-        self.lookup_index: Dict[str, int] = {}
+        self.resolver: Optional[CitationResolver] = None
 
     def build_lookup_index(self, judgments_metadata: List[Dict[str, Any]]) -> None:
-        """Build O(1) hash table for fast case name and citation matching."""
-        self.lookup_index.clear()
-        for j in judgments_metadata:
-            j_id = j["id"]
-            petitioner = (j.get("petitioner") or "").lower().strip()
-            respondent = (j.get("respondent") or "").lower().strip()
-
-            if petitioner and len(petitioner) > 3:
-                self.lookup_index[petitioner] = j_id
-                if respondent and len(respondent) > 3:
-                    full_name = f"{petitioner} v. {respondent}"
-                    self.lookup_index[full_name] = j_id
-                    full_name_vs = f"{petitioner} vs {respondent}"
-                    self.lookup_index[full_name_vs] = j_id
+        """Build the citation resolver over these judgments (dicts with id,
+        petitioner, respondent, date_of_judgment, and optionally header_text
+        / citations for their own reporter citations)."""
+        self.resolver = CitationResolver(judgments_metadata)
 
     def extract_citations(self, text: str) -> List[Dict[str, Any]]:
         """
@@ -60,13 +57,22 @@ class CitationExtractor:
         """
         extracted = []
         seen_texts = set()
+        reporter_spans: List[Tuple[int, int]] = []
 
         for pattern_re in self.compiled_citation_res:
+            is_reporter = pattern_re in self.compiled_reporter_res
             for match in pattern_re.finditer(text):
                 cited_str = match.group(0).strip()
                 # Skip short/junk matches
                 if len(cited_str) < 5 or cited_str.lower() in seen_texts:
                     continue
+                if is_reporter:
+                    # Reporter patterns overlap ("1955 1 S.C.R. 777" inside
+                    # "[1955] 1 S.C.R. 777"); the first to claim the text wins.
+                    start, end = match.span()
+                    if any(start < e and s < end for s, e in reporter_spans):
+                        continue
+                    reporter_spans.append((start, end))
 
                 seen_texts.add(cited_str.lower())
 
@@ -102,30 +108,13 @@ class CitationExtractor:
         self, cited_text: str, judgments_metadata: Optional[List[Dict[str, Any]]] = None
     ) -> Optional[int]:
         """
-        Try to match a cited text string to a target judgment ID. Uses O(1) index if built.
+        Match a cited text string to a target judgment ID, or None when there
+        is no confident match. Uses the index from build_lookup_index(), or
+        builds a one-off one from judgments_metadata.
         """
-        cited_clean = re.sub(r"\s+", " ", cited_text).lower().strip()
-
-        # O(1) lookup check
-        if cited_clean in self.lookup_index:
-            return self.lookup_index[cited_clean]
-
-        # Partial lookup check on indexed keys
-        for key, j_id in self.lookup_index.items():
-            if len(key) > 5 and key in cited_clean:
-                return j_id
-
-        if judgments_metadata:
-            for j in judgments_metadata:
-                j_id = j["id"]
-                petitioner = (j.get("petitioner") or "").lower()
-                respondent = (j.get("respondent") or "").lower()
-
-                if petitioner and respondent and len(petitioner) > 2 and len(respondent) > 2:
-                    if petitioner in cited_clean and respondent in cited_clean:
-                        return j_id
-
-                if petitioner and len(petitioner) > 3 and petitioner in cited_clean:
-                    return j_id
-
-        return None
+        resolver = self.resolver
+        if resolver is None:
+            if not judgments_metadata:
+                return None
+            resolver = CitationResolver(judgments_metadata)
+        return resolver.resolve(cited_text).judgment_id

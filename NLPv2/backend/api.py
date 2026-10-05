@@ -1,6 +1,7 @@
 from fastapi import Body, FastAPI, HTTPException, UploadFile, File, Form, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
+from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import tempfile
 import os
@@ -8,6 +9,7 @@ import os
 from rag_pipeline import LegalRAGPipeline
 from chat_store import is_valid_session_id
 from retrieval.citation_graph import CitationGraphManager
+from documents import DocumentStore
 
 app = FastAPI(
     title="Legal RAG API",
@@ -25,14 +27,26 @@ app.add_middleware(
 
 pipeline: Optional[LegalRAGPipeline] = None
 graph_manager: Optional[CitationGraphManager] = None
+document_store: Optional[DocumentStore] = None
 
 
 @app.on_event("startup")
 async def startup_event():
-    global pipeline, graph_manager
+    global pipeline, graph_manager, document_store
     pipeline = LegalRAGPipeline(load_llm=True)
-    graph_manager = CitationGraphManager()
+    # Share the pipeline's manager rather than building a second one.
+    graph_manager = getattr(pipeline, "graph_manager", None) or CitationGraphManager()
     graph_manager.load_graph_from_db()
+    # Same database settings as the graph manager.
+    document_store = DocumentStore(
+        {
+            "host": graph_manager.db_host,
+            "port": graph_manager.db_port,
+            "dbname": graph_manager.db_name,
+            "user": graph_manager.db_user,
+            "password": graph_manager.db_password,
+        }
+    )
 
 
 @app.get("/")
@@ -350,6 +364,145 @@ async def get_precedent_path(source_id: int, target_id: int):
         return {"success": True, "data": {"path": path}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/graph/search")
+async def search_cases(
+    q: str = Query(..., min_length=1, max_length=300),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Find cases by judgment ID, reporter citation or case name."""
+    if not graph_manager:
+        raise HTTPException(status_code=500, detail="Graph manager not initialized")
+
+    try:
+        return {"success": True, "data": graph_manager.search(q, limit=limit)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _neighbors_response(judgment_id: int, direction: str, relationship, limit: int, offset: int):
+    if not graph_manager:
+        raise HTTPException(status_code=500, detail="Graph manager not initialized")
+
+    try:
+        page = graph_manager.get_neighbors(
+            judgment_id, direction=direction, relationship=relationship, limit=limit, offset=offset
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    if page is None:
+        raise HTTPException(status_code=404, detail=f"Judgment {judgment_id} not found")
+    return {"success": True, "data": page}
+
+
+@app.get("/graph/judgment/{judgment_id}/cites")
+async def get_cases_cited(
+    judgment_id: int,
+    relationship: Optional[str] = None,
+    limit: int = Query(25, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """Paged list of the cases this judgment cites, most important first."""
+    return _neighbors_response(judgment_id, "cites", relationship, limit, offset)
+
+
+@app.get("/graph/judgment/{judgment_id}/cited-by")
+async def get_citing_cases(
+    judgment_id: int,
+    relationship: Optional[str] = None,
+    limit: int = Query(25, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """Paged list of the cases that cite this judgment, most important first."""
+    return _neighbors_response(judgment_id, "cited_by", relationship, limit, offset)
+
+
+class ResolveRequest(BaseModel):
+    citations: List[str]
+
+
+MAX_RESOLVE_BATCH = 500
+
+
+@app.post("/graph/resolve")
+async def resolve_citations(body: ResolveRequest):
+    """Resolve citation strings to judgment IDs, the same way edge building does."""
+    if not graph_manager:
+        raise HTTPException(status_code=500, detail="Graph manager not initialized")
+    if not 1 <= len(body.citations) <= MAX_RESOLVE_BATCH:
+        raise HTTPException(
+            status_code=422, detail=f"Send between 1 and {MAX_RESOLVE_BATCH} citations"
+        )
+
+    try:
+        return {"success": True, "data": graph_manager.resolve_citations(body.citations)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _documents() -> DocumentStore:
+    if not document_store:
+        raise HTTPException(status_code=500, detail="Document store not initialized")
+    return document_store
+
+
+def _pdf_response(path, missing: str):
+    if path is None:
+        raise HTTPException(status_code=404, detail=missing)
+    return FileResponse(path, media_type="application/pdf", filename=path.name)
+
+
+@app.get("/documents/judgment/{judgment_id}")
+async def get_judgment_document(judgment_id: int):
+    """A judgment's metadata and full text; has_pdf says whether the
+    original PDF is available."""
+    try:
+        doc = _documents().judgment(judgment_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    if doc is None:
+        raise HTTPException(status_code=404, detail=f"Judgment {judgment_id} not found")
+    return {"success": True, "data": doc}
+
+
+@app.get("/documents/judgment/{judgment_id}/pdf")
+async def get_judgment_pdf(judgment_id: int):
+    try:
+        path = _documents().judgment_pdf(judgment_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return _pdf_response(path, f"No original PDF available for judgment {judgment_id}")
+
+
+@app.get("/documents/statute-section/{section_id}")
+async def get_statute_section_document(section_id: int):
+    """A statute section's text; has_pdf says whether the statute's PDF is
+    available (GET /documents/statute/{statute_id}/pdf)."""
+    try:
+        doc = _documents().statute_section(section_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    if doc is None:
+        raise HTTPException(status_code=404, detail=f"Statute section {section_id} not found")
+    return {"success": True, "data": doc}
+
+
+@app.get("/documents/statute/{statute_id}/pdf")
+async def get_statute_pdf(statute_id: int):
+    try:
+        path = _documents().statute_pdf(statute_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return _pdf_response(path, f"No original PDF available for statute {statute_id}")
 
 
 if __name__ == "__main__":

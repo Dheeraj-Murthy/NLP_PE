@@ -21,36 +21,12 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 
+from db_schema import ensure_schema
+
 DEFAULT_SESSION = "default"
 SESSION_ID_RE = re.compile(r"^(default|[0-9a-f]{32})$")
 # Sessions untouched for longer than this are deleted when the API starts.
 RETENTION_DAYS = int(os.getenv("CHAT_SESSION_RETENTION_DAYS", "30"))
-
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS chat_sessions (
-    session_id TEXT PRIMARY KEY,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    -- Shown in the chat list; set from the first question unless renamed.
-    title TEXT,
-    -- Running summary of the oldest messages, made when the conversation
-    -- outgrew a model's context window; covers messages up to summary_upto.
-    summary TEXT,
-    summary_upto INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS chat_messages (
-    message_id SERIAL PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
-    role VARCHAR(16) NOT NULL,
-    content TEXT NOT NULL,          -- what the user sees
-    prompt_text TEXT,               -- what the model sees as history (answer without the source list)
-    retrieval_query TEXT,           -- user turns: the query actually used for retrieval
-    details JSONB,                  -- assistant turns: citations, sources, confidence, model
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, message_id);
-CREATE INDEX IF NOT EXISTS idx_chat_sessions_last_active ON chat_sessions(last_active DESC);
-"""
 
 TITLE_MAX_CHARS = 80
 
@@ -93,8 +69,8 @@ class ChatStore:
             try:
                 conn = self._connect()
                 try:
+                    ensure_schema(conn)
                     with conn.cursor() as cur:
-                        cur.execute(SCHEMA_SQL)
                         cur.execute(
                             "DELETE FROM chat_sessions WHERE session_id <> %s "
                             "AND last_active < now() - make_interval(days => %s)",
