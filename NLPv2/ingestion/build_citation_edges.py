@@ -56,7 +56,7 @@ BATCH_SIZE = 500
 def get_db_connection():
     return psycopg2.connect(
         host=os.getenv("DB_HOST", "localhost"),
-        port=os.getenv("DB_PORT", "5432"),
+        port=os.getenv("DB_PORT", "5433"),
         dbname=os.getenv("DB_NAME", "legal_rag"),
         user=os.getenv("DB_USER", "postgres"),
         password=os.getenv("DB_PASSWORD", "postgres"),
@@ -141,6 +141,10 @@ def populate_citation_edges(rebuild: bool = False) -> dict:
         f"{len(resolver.reporters)} reporter citations."
     )
     del judgments_meta
+    if resolver._automaton is None:
+        print("WARNING: pyahocorasick is not installed; every case-name citation is "
+              "compared against every case name, which takes hours on the full corpus. "
+              "pip install pyahocorasick")
 
     counts: Counter = Counter()
     judgments_scanned = 0

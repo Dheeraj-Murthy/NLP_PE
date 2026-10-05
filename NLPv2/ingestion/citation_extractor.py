@@ -12,16 +12,15 @@ from typing import List, Dict, Any, Optional, Tuple
 
 # backend/ is a sibling directory holding the shared resolver (same pattern as ingest.py).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
-from graph.citation_resolver import REPORTER_PATTERNS, CitationResolver
+from graph.citation_resolver import CASE_TITLE_PATTERN, REPORTER_PATTERNS, CitationResolver
 
 
 class CitationExtractor:
     """Extracts precedent citations and case relationships from legal judgment text."""
 
-    # Case title citations: Petitioner v[s]. Respondent (Year)
-    CASE_TITLE_PATTERN = (
-        r"([A-Z][A-Za-z0-9\.\s\&]+\s+(?:v\.|vs\.|Versus)\s+[A-Z][A-Za-z0-9\.\s\&]+(?:\s*\(\d{4}\))?)"
-    )
+    # Case title citations: Petitioner v[s]. Respondent (Year), parsed the same
+    # way the resolver reads them back.
+    CASE_TITLE_PATTERN = CASE_TITLE_PATTERN
     # Reporter citations (AIR 1987 SC 1086, [1950] S.C.R. 940, (1992) 1 SCC 588,
     # A.I.R. 1953 S.C. 75, ...) come from the shared resolver, so extraction and
     # resolution agree on every format; then case titles.
@@ -36,10 +35,11 @@ class CitationExtractor:
     }
 
     def __init__(self):
-        # Reporter patterns are case-sensitive ("AIR", not "air"); case titles aren't.
+        # Case-sensitive, case titles included: party names are capitalised
+        # words, and ignoring case made the title pattern match whole sentences.
         self.compiled_reporter_res = list(REPORTER_PATTERNS)
         self.compiled_citation_res = self.compiled_reporter_res + [
-            re.compile(self.CASE_TITLE_PATTERN, re.IGNORECASE)
+            re.compile(self.CASE_TITLE_PATTERN)
         ]
         self.resolver: Optional[CitationResolver] = None
 

@@ -228,12 +228,16 @@ def _split_parties(alias: str) -> Tuple[Set[str], Set[str]]:
 # A party name in running text: capitalised words, initials and the small
 # words inside names ("State of Bombay", "F. N. Balsara", "Tata & Sons").
 # Lowercase narrative ("relied upon the decision in") is never part of a name.
-_PARTY_WORD = r"(?:[A-Z][A-Za-z0-9.'\u2019&\-]*|of|and|the|for|&)"
-_TITLE_RE = re.compile(
-    r"((?:" + _PARTY_WORD + r"\s+)*" + _PARTY_WORD + r")\s*,?\s+"
-    r"(?:v|vs|V|Vs|VS|versus|Versus|VERSUS)\.?\s+"
-    r"((?:" + _PARTY_WORD + r"\s+)*" + _PARTY_WORD + r")"
-)
+# At most 12 words a side: an unbounded run made an all-caps stretch of a
+# judgment cost quadratic time to scan.
+_NAME_WORD = r"[A-Z][A-Za-z0-9.'\u2019&\-]*"
+_PARTY_WORD = r"(?:" + _NAME_WORD + r"|of|and|the|for|&)"
+_PARTY = r"(" + _NAME_WORD + r"(?:\s+" + _PARTY_WORD + r"){0,11})"
+_TITLE = _PARTY + r"\s*,?\s+(?:v|vs|V|Vs|VS|versus|Versus|VERSUS)\.?\s+" + _PARTY
+_TITLE_RE = re.compile(_TITLE)
+# A case title as written in a judgment, with its year if given:
+# "Kesavananda Bharati v. State of Kerala (1973)".
+CASE_TITLE_PATTERN = _TITLE + r"(?:\s*[\[(](?:1[89]\d{2}|20\d{2})[\])])?"
 # Sentence openers that get capitalised in front of a case name.
 _LEAD_WORDS = frozenset(
     "in see also cf per vide following relying relied followed referring "
