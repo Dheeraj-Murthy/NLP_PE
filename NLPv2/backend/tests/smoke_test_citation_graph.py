@@ -63,6 +63,16 @@ def test_citation_graph_manager():
     print(f"Shortest path from Case #3 -> Case #1: {path}")
     assert path == [3, 1], "Path should be direct edge [3, 1]"
 
+    # Test Mind Map
+    tree = gm.get_mind_map(1, per_branch=1)
+    cites, cited_by = tree["children"]
+    print(f"Mind map for Case #1: cites {cites['count']}, cited by {cited_by['count']}")
+    assert tree["label"].startswith("Kesavananda") and cites["count"] == 0
+    assert cited_by["count"] == 2 and [c["kind"] for c in cited_by["children"]] == ["case", "more"]
+    case3 = gm.get_mind_map(1)["children"][1]["children"][1]
+    assert case3["id"] == 3 and [b["count"] for b in case3["children"]] == [1], "Root is left out of a child's branches"
+    assert gm.get_mind_map(99) is None
+
     print("✓ CitationGraphManager synthetic test passed!")
 
 

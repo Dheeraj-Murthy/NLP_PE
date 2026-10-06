@@ -283,6 +283,19 @@ def graph_neighbors(
     return _handle_response(resp)["data"]
 
 
+def graph_mind_map(judgment_id: int, per_branch: int = 12, child_per_branch: int = 5) -> Dict[str, Any]:
+    """A judgment's citations as a tree for the mind-map view."""
+    try:
+        resp = requests.get(
+            _url(f"/graph/judgment/{judgment_id}/mind-map"),
+            params={"per_branch": per_branch, "child_per_branch": child_per_branch},
+            timeout=DEFAULT_TIMEOUT,
+        )
+    except requests.RequestException as e:
+        raise LegalRAGAPIError(str(e)) from e
+    return _handle_response(resp)["data"]
+
+
 def document(doc_type: str, doc_id: int) -> Dict[str, Any]:
     """doc_type "judgment" (doc_id = judgment ID) or "statute" (doc_id = statute section ID)."""
     path = f"/documents/judgment/{doc_id}" if doc_type == "judgment" else f"/documents/statute-section/{doc_id}"

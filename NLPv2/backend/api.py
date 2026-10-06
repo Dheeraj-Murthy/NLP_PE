@@ -418,6 +418,26 @@ async def get_citing_cases(
     return _neighbors_response(judgment_id, "cited_by", relationship, limit, offset)
 
 
+@app.get("/graph/judgment/{judgment_id}/mind-map")
+async def get_mind_map(
+    judgment_id: int,
+    per_branch: int = Query(12, ge=1, le=50),
+    child_per_branch: int = Query(5, ge=0, le=20),
+):
+    """A judgment's citations as a tree (cites / cited by, grouped by
+    relationship, two levels deep) for the mind-map view."""
+    if not graph_manager:
+        raise HTTPException(status_code=500, detail="Graph manager not initialized")
+
+    try:
+        tree = graph_manager.get_mind_map(judgment_id, per_branch=per_branch, child_per_branch=child_per_branch)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    if tree is None:
+        raise HTTPException(status_code=404, detail=f"Judgment {judgment_id} not found")
+    return {"success": True, "data": tree}
+
+
 class ResolveRequest(BaseModel):
     citations: List[str]
 

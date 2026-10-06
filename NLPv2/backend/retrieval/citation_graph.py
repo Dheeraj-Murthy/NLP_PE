@@ -446,6 +446,90 @@ class CitationGraphManager:
             return self._pg.neighbors(judgment_id, direction, relationship, limit, offset)
         return self._mem_neighbors(judgment_id, direction, relationship, limit, offset)
 
+    # Display order for relationship groups in the mind map, strongest first.
+    RELATIONSHIP_ORDER = ["overruled", "followed", "distinguished", "referred", "cited"]
+
+    def _judgment_info(self, judgment_id: int) -> Dict[str, Any]:
+        """Label, court and date of one judgment."""
+        if self._use_postgres():
+            return self._pg.judgment_info(judgment_id)
+        data = self.graph.nodes[judgment_id]
+        return {"label": data.get("label", f"Case #{judgment_id}"), "court": data.get("court"), "date": data.get("date")}
+
+    def get_mind_map(
+        self, judgment_id: int, per_branch: int = 12, child_per_branch: int = 5
+    ) -> Optional[Dict[str, Any]]:
+        """
+        A judgment's precedent neighbourhood as a tree, for a mind-map view:
+        root case -> "Cites" / "Cited by" -> relationship groups -> the most
+        important cases -> each of those cases' own top citations. Lists are
+        capped (most important first) and say how many were left out, so the
+        tree stays readable around landmark cases with thousands of
+        citations. None if the judgment doesn't exist.
+        """
+        cites = self.get_neighbors(judgment_id, "cites", limit=per_branch)
+        if cites is None:
+            return None
+        cited_by = self.get_neighbors(judgment_id, "cited_by", limit=per_branch)
+
+        def case(item: Dict[str, Any], **extra) -> Dict[str, Any]:
+            return {
+                "kind": "case",
+                "id": item["judgment_id"],
+                "label": item["label"],
+                "court": item.get("court"),
+                "date": str(item["date"]) if item.get("date") else None,
+                "relationship": item.get("relationship"),
+                **extra,
+            }
+
+        def more(shown: int, total: int) -> List[Dict[str, Any]]:
+            if total <= shown:
+                return []
+            return [{"kind": "more", "label": f"+{total - shown} more", "count": total - shown}]
+
+        def branch_node(direction: str, total: int, children: List[Dict[str, Any]]) -> Dict[str, Any]:
+            label = "Cites" if direction == "cites" else "Cited by"
+            return {"kind": "branch", "direction": direction, "label": label, "count": total, "children": children}
+
+        def child_branches(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+            """Second level: a neighbour's own top citations, ungrouped. The
+            root is left out, since it is already on screen."""
+            branches = []
+            for direction in ("cites", "cited_by"):
+                page = self.get_neighbors(item["judgment_id"], direction, limit=child_per_branch + 1)
+                if not page:
+                    continue
+                items = [i for i in page["items"] if i["judgment_id"] != judgment_id][:child_per_branch]
+                total = page["total"] - any(i["judgment_id"] == judgment_id for i in page["items"])
+                if total:
+                    branches.append(branch_node(direction, total, [case(i) for i in items] + more(len(items), total)))
+            return branches
+
+        def top_branch(page: Dict[str, Any], direction: str) -> Dict[str, Any]:
+            groups: Dict[str, List[Dict[str, Any]]] = {}
+            for item in page["items"]:
+                rel = item.get("relationship") or "cited"
+                groups.setdefault(rel, []).append(case(item, children=child_branches(item)))
+            order = {r: n for n, r in enumerate(self.RELATIONSHIP_ORDER)}
+            rels = sorted(groups, key=lambda r: (order.get(r, len(order)), r))
+            if len(rels) == 1:
+                # A single kind of relationship: a group level would only add a click.
+                children = groups[rels[0]]
+            else:
+                children = [
+                    {"kind": "group", "label": rel.capitalize(), "count": len(groups[rel]), "children": groups[rel]}
+                    for rel in rels
+                ]
+            return branch_node(direction, page["total"], children + more(len(page["items"]), page["total"]))
+
+        return {
+            "kind": "case",
+            "id": judgment_id,
+            **self._judgment_info(judgment_id),
+            "children": [top_branch(cites, "cites"), top_branch(cited_by, "cited_by")],
+        }
+
     def search(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Cases matching an ID, a reporter citation or a case name. Always
         queries PostgreSQL, in either mode."""

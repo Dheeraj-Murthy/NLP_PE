@@ -134,6 +134,12 @@ class PostgresGraphStore:
             for row in cur.fetchall()
         }
 
+    def judgment_info(self, judgment_id: int) -> Dict[str, Any]:
+        """Label, court and date of one judgment."""
+        with self._cursor() as cur:
+            info = self._judgments(cur, [judgment_id])
+        return info.get(judgment_id) or {"label": f"Case #{judgment_id}", "court": None, "date": None}
+
     def _exists(self, cur, judgment_id: int) -> bool:
         cur.execute("SELECT EXISTS (SELECT 1 FROM judgments WHERE id = %s)", (judgment_id,))
         return bool(cur.fetchone()[0])
