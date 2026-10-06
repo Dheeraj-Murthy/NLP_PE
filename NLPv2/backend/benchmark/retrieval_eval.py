@@ -206,6 +206,8 @@ def run_eval(
     stage2_judgment_pairs: List[Tuple[Any, List[Any]]] = []
     section_stage1_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
     section_stage2_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
+    section_stage1_judgment_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
+    section_stage2_judgment_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
 
     start = time.time()
     for gold in valid_records:
@@ -225,6 +227,8 @@ def run_eval(
         stage2_judgment_pairs.append((target_judgment, stage2_judgment_ids))
         section_stage1_pairs[gold["section"]].append((target_chunk, stage1_chunk_ids))
         section_stage2_pairs[gold["section"]].append((target_chunk, stage2_chunk_ids))
+        section_stage1_judgment_pairs[gold["section"]].append((target_judgment, stage1_judgment_ids))
+        section_stage2_judgment_pairs[gold["section"]].append((target_judgment, stage2_judgment_ids))
 
         per_query.append(
             evaluate_query(gold, stage1_chunk_ids, stage2_chunk_ids, stage1_judgment_ids, stage2_judgment_ids, k_values)
@@ -236,6 +240,8 @@ def run_eval(
             "n": len(section_stage1_pairs[section]),
             "stage1": aggregate(section_stage1_pairs[section], k_values),
             "stage2": aggregate(section_stage2_pairs[section], k_values),
+            "stage1_judgment": aggregate(section_stage1_judgment_pairs[section], k_values),
+            "stage2_judgment": aggregate(section_stage2_judgment_pairs[section], k_values),
         }
         for section in section_stage1_pairs
     }
@@ -347,13 +353,14 @@ def main() -> None:
     _print_block("\nStage 2 (post-rerank, final top_k) — chunk-level:", report["aggregate_stage2_chunk"])
     _print_block("\nStage 2 (post-rerank, final top_k) — judgment-level:", report["aggregate_stage2_judgment"])
 
-    print("\nPer-section (stage 2, chunk-level):")
+    print("\nPer-section (stage 2, final top_k) — chunk-level vs judgment-level:")
     for section, block in sorted(report["per_section"].items()):
         s2 = block["stage2"]
+        s2j = block["stage2_judgment"]
         print(
             f"  {section} (n={block['n']}): "
-            f"recall@{args.top_k}={s2.get(f'recall@{args.top_k}', float('nan')):.3f}  "
-            f"mrr={s2.get('mrr', float('nan')):.3f}"
+            f"chunk recall@{args.top_k}={s2.get(f'recall@{args.top_k}', float('nan')):.3f} mrr={s2.get('mrr', float('nan')):.3f}  |  "
+            f"judgment recall@{args.top_k}={s2j.get(f'recall@{args.top_k}', float('nan')):.3f} mrr={s2j.get('mrr', float('nan')):.3f}"
         )
 
     print(f"\nWrote report to {output}")
