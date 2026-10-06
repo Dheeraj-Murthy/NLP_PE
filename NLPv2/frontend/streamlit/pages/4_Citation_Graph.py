@@ -1,6 +1,7 @@
 import streamlit as st
 
 from lib import api_client
+from lib.mind_map import render_mind_map
 from lib.ui_helpers import linked_label, render_api_error
 
 
@@ -60,9 +61,24 @@ def _focus_from(widget_key: str, options: dict, reset: bool = False) -> None:
             st.session_state[widget_key] = "—"
 
 
+# "Map this case" links in the mind map open the page as Citation_Graph?focus=<id>.
+try:
+    _linked_focus = int(st.query_params.get("focus", ""))
+except ValueError:
+    _linked_focus = None
+if _linked_focus and st.session_state.get("_linked_focus") != _linked_focus:
+    st.session_state["_linked_focus"] = _linked_focus
+    _focus(_linked_focus, f"Case #{_linked_focus}")
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _search(q: str):
     return api_client.graph_search(q, limit=15)
+
+
+@st.cache_data(ttl=300, show_spinner="Building mind map…")
+def _mind_map(judgment_id: int, per_branch: int):
+    return api_client.graph_mind_map(judgment_id, per_branch=per_branch)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -94,9 +110,38 @@ if query.strip():
     else:
         st.caption("No matching cases.")
 
-tab_landmarks, tab_ego, tab_neighbors, tab_path = st.tabs(
-    ["Landmark cases", "Ego graph", "Cites / Cited by", "Precedent path"]
+tab_map, tab_landmarks, tab_neighbors, tab_path, tab_ego = st.tabs(
+    ["Mind map", "Landmark cases", "Cites / Cited by", "Precedent path", "Full network"]
 )
+
+with tab_map:
+    st.caption(
+        "The case's precedents at a glance: what it cites and what cites it, grouped by how they were treated. "
+        "Click a node to open or close it, click a case for its details."
+    )
+    with st.container(horizontal=True):
+        map_id = st.number_input(
+            "Judgment ID",
+            min_value=1,
+            value=st.session_state["graph_focus"],
+            step=1,
+            placeholder="Search above or type an ID",
+            key=f"map_center_{st.session_state['graph_focus']}",
+        )
+        per_branch = st.slider(
+            "Cases per branch",
+            min_value=4,
+            max_value=30,
+            value=12,
+            help="The most important cases on each side are shown; the rest are summarised as “+N more”.",
+        )
+    if map_id is None:
+        st.caption("Search for a case above, or pick one from Landmark cases, to map its precedents.")
+    else:
+        try:
+            render_mind_map(_mind_map(int(map_id), per_branch), height=660)
+        except Exception as e:
+            render_api_error(e)
 
 with tab_landmarks:
     st.caption("Top authority cases by PageRank centrality over the citation network.")
@@ -134,7 +179,7 @@ with tab_landmarks:
         st.caption("No landmark cases returned — citation graph may be empty.")
 
 with tab_ego:
-    st.caption("N-hop citation network centered on a single judgment.")
+    st.caption("N-hop citation network centered on a single judgment. For large neighbourhoods the mind map is easier to read.")
     with st.container(horizontal=True):
         judgment_id = st.number_input(
             "Judgment ID",
