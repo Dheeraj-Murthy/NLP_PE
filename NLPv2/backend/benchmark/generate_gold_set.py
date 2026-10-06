@@ -36,6 +36,7 @@ from llm.base import LLMBackend, PrivacyGateError  # noqa: E402
 SECTIONS = ["facts", "issues", "arguments", "ratio", "judgment"]
 MAX_CHUNKS_PER_JUDGMENT = 2
 MIN_CHUNK_CHARS = 200  # skip near-empty chunks that can't support a real question
+MAX_NON_ASCII_RATIO = 0.2  # skip chunks with garbled/mis-encoded PDF extraction
 
 GOLD_GEN_SYSTEM_PROMPT = (
     "You are generating evaluation data for a legal search system. Given an "
@@ -59,6 +60,18 @@ def _default_db_connection_string() -> str:
     return f"host={host} port={port} dbname={dbname} user={user} password={password}"
 
 
+def _is_garbled(content: str) -> bool:
+    """Flags chunks with a high proportion of non-ASCII characters — this
+    corpus is all-English Supreme Court judgments, so a chunk heavy in
+    non-Latin codepoints is a pdftotext font-encoding mis-extraction
+    (mojibake), not real content, and would waste a gold query on
+    something not even a human can read."""
+    if not content:
+        return True
+    non_ascii = sum(1 for ch in content if ord(ch) > 0x2000)
+    return (non_ascii / len(content)) > MAX_NON_ASCII_RATIO
+
+
 def _fetch_all_chunks(cur) -> List[Dict[str, Any]]:
     cur.execute(
         "SELECT chunk_id, judgment_id, section, content "
@@ -68,6 +81,7 @@ def _fetch_all_chunks(cur) -> List[Dict[str, Any]]:
     return [
         {"chunk_id": r[0], "judgment_id": r[1], "section": r[2], "content": r[3]}
         for r in cur.fetchall()
+        if not _is_garbled(r[3])
     ]
 
 
