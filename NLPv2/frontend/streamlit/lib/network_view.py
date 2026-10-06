@@ -51,8 +51,10 @@ _TEMPLATE = r"""
   .toolbar button { font: 500 12px Inter, system-ui, sans-serif; color: var(--text); background: var(--bg); border: 1px solid var(--border);
     border-radius: 6px; padding: 5px 10px; cursor: pointer; }
   .toolbar button:hover { background: #F4F4F5; }
-  .legend { position: absolute; top: 12px; left: 12px; display: flex; gap: 14px; font-size: 12px; color: var(--muted); }
-  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; background: var(--c); }
+  .legend { position: absolute; top: 8px; left: 8px; display: flex; gap: 14px; font-size: 12px; color: var(--muted);
+    background: var(--canvas); padding: 4px 6px; border-radius: 6px; }
+  .legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 5px; margin-right: 6px; vertical-align: -1px; background: var(--c); }
+  .legend span.outline::before { background: var(--bg); border: 1.5px solid var(--muted); width: 8px; height: 8px; }
   .tip { position: absolute; pointer-events: none; background: var(--text); color: var(--bg); font-size: 12px; padding: 4px 8px;
     border-radius: 4px; max-width: 320px; display: none; }
   .card { position: absolute; left: 12px; bottom: 12px; max-width: 380px; background: var(--bg); border: 1px solid var(--border);
@@ -60,7 +62,7 @@ _TEMPLATE = r"""
   .card h4 { margin: 0 0 4px; font-size: 13.5px; font-weight: 600; line-height: 1.35; }
   .card .meta { color: var(--muted); margin-bottom: 8px; }
   .card a { color: var(--text); font-weight: 500; margin-right: 14px; }
-  .hint { position: absolute; right: 12px; bottom: 10px; font-size: 11px; color: var(--muted); }
+  .hint { position: absolute; right: 8px; bottom: 6px; font-size: 11px; color: var(--muted); background: var(--canvas); padding: 2px 6px; border-radius: 4px; }
 </style>
 </head>
 <body>
@@ -69,7 +71,7 @@ _TEMPLATE = r"""
   <div class="legend">
     <span style="--c: var(--cites)">Cases it cites</span>
     <span style="--c: var(--citedby)">Cases citing it</span>
-    <span style="--c: var(--other)">Further out</span>
+    <span style="--c: var(--other)" class="outline">Further out</span>
   </div>
   <div class="toolbar"><button id="fit">Fit</button></div>
   <div class="tip" id="tip"></div>
@@ -109,14 +111,34 @@ if (center && G.nodes.some(n => n.hop === undefined)) {
 // ---- Radial layout -------------------------------------------------------
 // Ring h holds the cases h hops out. Hop 1 is split into what the case cites
 // and what cites it; every further case sits next to the case (one ring in)
-// that brought it in, so each first-hop case gets its own wedge.
+// that brought it in, so each first-hop case gets its own wedge. Each case
+// is a capsule pointing outward from its ring, like a spoke, so a crowded
+// ring packs capsules side by side instead of on top of each other.
+const FONT = "500 12px Inter, system-ui, sans-serif";
+const CAP_H = 20, CAP_PAD = 9, MAX_TEXT_W = 190, RING_GAP = 70, SLOT = CAP_H + 6;
+
+function fitLabel(label) {
+  if (ctx.measureText(label).width <= MAX_TEXT_W) return label;
+  let s = label;
+  while (s.length > 1 && ctx.measureText(s + "…").width > MAX_TEXT_W) s = s.slice(0, -1);
+  return s.trimEnd() + "…";
+}
+
 function layout() {
   if (!center) return;
+  ctx.font = FONT;
+  for (const n of G.nodes) {
+    n.text = fitLabel(n.label);
+    n.len = ctx.measureText(n.text).width + CAP_PAD * 2;
+    n.kids = 0;
+  }
   const rings = [];
   for (const n of G.nodes) (rings[n.hop] = rings[n.hop] || []).push(n);
-  center.x = 0; center.y = 0; center.angle = 0; center.side = "center";
-  for (const n of G.nodes) n.kids = 0;
-  let radius = 0;
+  center.x = center.y = 0; center.angle = 0; center.side = "center";
+  center.ux = 1; center.uy = 0;
+  center.mx = 0; center.my = 0;  // the case's own capsule lies flat, centred
+  center.ox = center.oy = 0;
+  let radius = center.len / 2, prevLen = 0;
   for (let h = 1; h < rings.length; h++) {
     const ring = rings[h] || [];
     for (const n of ring) {
@@ -125,8 +147,8 @@ function layout() {
         n.parent = center;
       } else {
         // Of its neighbours one ring in, join the one with the fewest cases so
-        // far: wedges stay about as wide as the ring spacing allows, so each
-        // case lands near the case that brought it in.
+        // far: wedges stay even, so each case lands near the case that
+        // brought it in.
         let best = null;
         for (const id of n.nbrs) {
           const m = byId.get(id);
@@ -139,23 +161,42 @@ function layout() {
     }
     if (h === 1) ring.sort((a, b) => (a.side > b.side) - (a.side < b.side) || b.nbrs.size - a.nbrs.size || a.id - b.id);
     else ring.sort((a, b) => a.parent.angle - b.parent.angle || b.nbrs.size - a.nbrs.size || a.id - b.id);
-    // Leave room for every node on the ring, and at least 180px between rings.
-    radius = Math.max(radius + 180, (ring.length * 14) / (2 * Math.PI));
+    // Clear the previous ring's capsules, and leave a capsule's width per case around the ring.
+    radius = Math.max(radius + prevLen + RING_GAP, (ring.length * SLOT) / (2 * Math.PI));
+    prevLen = Math.max(0, ...ring.map(n => n.len));
     ring.forEach((n, i) => {
       n.angle = (i + 0.5) / ring.length * 2 * Math.PI;
-      n.x = Math.cos(n.angle - Math.PI / 2) * radius;
-      n.y = Math.sin(n.angle - Math.PI / 2) * radius;
+      n.ux = Math.cos(n.angle - Math.PI / 2); n.uy = Math.sin(n.angle - Math.PI / 2);
+      n.x = n.ux * radius; n.y = n.uy * radius;                                  // inner end, on the ring
+      n.ox = n.x + n.ux * n.len; n.oy = n.y + n.uy * n.len;                      // outer end
+      n.mx = n.x + n.ux * n.len / 2; n.my = n.y + n.uy * n.len / 2;              // middle
     });
   }
   for (const n of G.nodes) {
-    n.r = n === center ? 11 : Math.min(9, 3.5 + Math.sqrt(n.nbrs.size));
-    n.color = n === center ? COLORS.center : n.hop === 1 ? COLORS[n.side] : COLORS.other;
+    const strong = n === center ? COLORS.center : COLORS[n.side] || COLORS.other;
+    // The case and its direct citations are filled; further cases are outlined in their wedge's colour.
+    n.fill = n.hop <= 1 ? strong : v("--bg");
+    n.stroke = strong;
+    n.ink = n.hop <= 1 ? "#FFFFFF" : v("--text");
   }
 }
-layout();
-const isTree = e => byId.get(e.source).parent === byId.get(e.target) || byId.get(e.target).parent === byId.get(e.source);
-const treeEdges = edges.filter(isTree), crossEdges = edges.filter(e => !isTree(e));
-const crossAlpha = Math.max(0.03, Math.min(0.2, 0.2 * Math.sqrt(150 / Math.max(1, crossEdges.length))));
+
+// Where an edge meets a case: links outward leave from the outer end,
+// links inward or around the ring arrive at the inner end.
+function end(n, other) {
+  if (n === center) return [0, 0];
+  return other.hop > n.hop ? [n.ox, n.oy] : [n.x, n.y];
+}
+
+let treeEdges = [], crossEdges = [], crossAlpha = 0.2;
+function relayout() {
+  layout();
+  const isTree = e => byId.get(e.source).parent === byId.get(e.target) || byId.get(e.target).parent === byId.get(e.source);
+  treeEdges = edges.filter(isTree);
+  crossEdges = edges.filter(e => !isTree(e));
+  crossAlpha = Math.max(0.03, Math.min(0.2, 0.2 * Math.sqrt(150 / Math.max(1, crossEdges.length))));
+}
+relayout();
 
 // ---- Drawing -------------------------------------------------------------
 let W = 0, H = 0, dpr = 1;
@@ -169,6 +210,17 @@ function resize() {
   W = r.width; H = r.height;
   cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
   return true;
+}
+
+function pill(x, y, w, h) {
+  const r = h / 2;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arc(x + w - r, y + r, r, -Math.PI / 2, Math.PI / 2);
+  ctx.lineTo(x + r, y + h);
+  ctx.arc(x + r, y + r, r, Math.PI / 2, Math.PI * 1.5);
+  ctx.closePath();
 }
 
 function draw() {
@@ -186,84 +238,100 @@ function draw() {
   // path, so thousands of edges are two strokes. The focused case's edges
   // go on top with arrows.
   ctx.lineWidth = 1 / t.k;
-  for (const [set, alpha] of [[crossEdges, crossAlpha], [treeEdges, 0.4]]) {
+  for (const [set, alpha] of [[crossEdges, crossAlpha], [treeEdges, 0.45]]) {
     ctx.strokeStyle = `rgba(113,113,122,${focus ? alpha * 0.35 : alpha})`;
     ctx.beginPath();
     for (const e of set) {
       const a = byId.get(e.source), b = byId.get(e.target);
-      ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+      ctx.moveTo(...end(a, b)); ctx.lineTo(...end(b, a));
     }
     ctx.stroke();
   }
   if (focus) {
-    ctx.strokeStyle = ctx.fillStyle = "rgba(9,9,11,0.65)";
+    ctx.strokeStyle = ctx.fillStyle = "rgba(9,9,11,0.7)";
     ctx.lineWidth = 1.4 / t.k;
     for (const e of edges) {
       if (e.source !== focus.id && e.target !== focus.id) continue;
-      arrow(byId.get(e.source), byId.get(e.target));
+      const a = byId.get(e.source), b = byId.get(e.target);
+      arrow(end(a, b), end(b, a));
     }
   }
 
+  // Capsules. Text is skipped when too small to read, and capsules off
+  // screen are skipped altogether.
+  ctx.font = FONT;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const readable = 12 * t.k >= 6;
   for (const n of G.nodes) {
-    ctx.globalAlpha = lit && !lit.has(n.id) ? 0.2 : 1;
-    ctx.beginPath();
-    ctx.arc(n.x, n.y, n.r, 0, 2 * Math.PI);
-    ctx.fillStyle = n.color;
+    const sx = n.mx * t.k + t.x, sy = n.my * t.k + t.y, reach = n.len * t.k;
+    if (sx < -reach || sx > W + reach || sy < -reach || sy > H + reach) continue;
+    // Cases outside the focus fade to outlines, so their names stay legible.
+    const dim = lit && !lit.has(n.id);
+    ctx.globalAlpha = dim ? 0.3 : 1;
+    ctx.save();
+    ctx.translate(n.mx, n.my);
+    // Keep text upright: capsules on the left half are turned around.
+    let a = Math.atan2(n.uy, n.ux);
+    if (n.ux < -1e-6) a += Math.PI;
+    ctx.rotate(a);
+    pill(-n.len / 2, -CAP_H / 2, n.len, CAP_H);
+    ctx.fillStyle = dim ? v("--bg") : n.fill;
     ctx.fill();
-    if (n === selected) { ctx.lineWidth = 2.5 / t.k; ctx.strokeStyle = v("--text"); ctx.stroke(); }
+    ctx.lineWidth = (n === selected ? 2.5 : 1.2) / t.k;
+    ctx.strokeStyle = n === selected ? v("--text") : n.stroke;
+    ctx.stroke();
+    if (readable) {
+      ctx.fillStyle = dim ? v("--text") : n.ink;
+      ctx.fillText(n.text, 0, 1);
+    }
+    ctx.restore();
   }
   ctx.globalAlpha = 1;
-
-  // Labels: the case itself, its first hop once there is room, and whatever is in focus.
-  ctx.font = `500 ${12 / t.k}px Inter, system-ui, sans-serif`;
-  ctx.textBaseline = "middle";
-  const hop1 = G.nodes.filter(n => n.hop === 1).length;
-  const roomy = t.k * 2 * Math.PI * 150 / Math.max(1, hop1) > 14;
-  for (const n of G.nodes) {
-    const show = n === center || (lit && lit.has(n.id) && (n === focus || lit.size <= 40)) || (!lit && n.hop === 1 && roomy);
-    if (!show) continue;
-    const label = n.label.length > 48 ? n.label.slice(0, 47) + "…" : n.label;
-    const left = n.x < -1;
-    ctx.textAlign = left ? "right" : "left";
-    const x = n.x + (left ? -1 : 1) * (n.r + 4 / t.k);
-    ctx.lineWidth = 3 / t.k; ctx.strokeStyle = v("--canvas"); ctx.strokeText(label, x, n.y);
-    ctx.fillStyle = v("--text"); ctx.fillText(label, x, n.y);
-  }
 }
 
-function arrow(a, b) {
-  const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1;
-  const ux = dx / len, uy = dy / len;
-  const tx = b.x - ux * (b.r + 1), ty = b.y - uy * (b.r + 1), s = 7 / t.k;
-  ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(tx, ty); ctx.stroke();
+function arrow([ax, ay], [bx, by]) {
+  const dx = bx - ax, dy = by - ay, len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len, s = 7 / t.k;
+  ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(tx, ty);
-  ctx.lineTo(tx - ux * s - uy * s * 0.5, ty - uy * s + ux * s * 0.5);
-  ctx.lineTo(tx - ux * s + uy * s * 0.5, ty - uy * s - ux * s * 0.5);
+  ctx.moveTo(bx, by);
+  ctx.lineTo(bx - ux * s - uy * s * 0.5, by - uy * s + ux * s * 0.5);
+  ctx.lineTo(bx - ux * s + uy * s * 0.5, by - uy * s - ux * s * 0.5);
   ctx.fill();
 }
 
 function redraw() { if (!queued) { queued = true; requestAnimationFrame(draw); } }
 
-function fit() {
+// Fit everything, or (first) only the case and its direct citations: a
+// whole two- or three-hop network fitted to the frame is too small to read,
+// while the first ring is what one opens the view for.
+function fit(firstRing = false) {
   if (!G.nodes.length || !W) return;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  for (const n of G.nodes) { x0 = Math.min(x0, n.x); x1 = Math.max(x1, n.x); y0 = Math.min(y0, n.y); y1 = Math.max(y1, n.y); }
-  const pad = 60;
+  for (const n of G.nodes) {
+    if (firstRing && n.hop > 1) continue;
+    const xs = n === center ? [-n.len / 2, n.len / 2] : [n.x, n.ox], ys = n === center ? [0, 0] : [n.y, n.oy];
+    x0 = Math.min(x0, ...xs); x1 = Math.max(x1, ...xs); y0 = Math.min(y0, ...ys); y1 = Math.max(y1, ...ys);
+  }
+  const pad = 30;
   const k = Math.min(1.5, (W - pad * 2) / Math.max(1, x1 - x0), (H - pad * 2) / Math.max(1, y1 - y0));
   t = { k, x: W / 2 - (x0 + x1) / 2 * k, y: H / 2 - (y0 + y1) / 2 * k };
   redraw();
 }
 
 // ---- Interaction ---------------------------------------------------------
+// A point is on a capsule if, in the capsule's own frame, it is within its
+// length and height (never less than a few screen pixels, to stay clickable).
 function nodeAt(px, py) {
   const x = (px - t.x) / t.k, y = (py - t.y) / t.k;
-  let best = null, bestD = Infinity;
-  for (const n of G.nodes) {
-    const d = Math.hypot(n.x - x, n.y - y);
-    if (d <= Math.max(n.r, 6 / t.k) && d < bestD) { best = n; bestD = d; }
+  const minHalf = 4 / t.k;
+  for (let i = G.nodes.length - 1; i >= 0; i--) {  // topmost first
+    const n = G.nodes[i], dx = x - n.mx, dy = y - n.my;
+    const along = dx * n.ux + dy * n.uy, across = -dx * n.uy + dy * n.ux;
+    if (Math.abs(along) <= Math.max(n.len / 2, minHalf) && Math.abs(across) <= Math.max(CAP_H / 2, minHalf)) return n;
   }
-  return best;
+  return null;
 }
 
 const esc = s => String(s).replace(/[&<>"]/g, ch => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
@@ -321,12 +389,23 @@ document.getElementById("fit").onclick = () => fit();
 
 // The iframe has no size while its tab is hidden: fit the first time it gets
 // one, and afterwards only repaint (no layout work) on resize.
+// Resizing the canvas clears it, so repaint straight away, not next frame.
 let fitted = false;
 new ResizeObserver(() => {
   if (!resize()) return;
-  if (!fitted) { fitted = true; fit(); } else redraw();
+  if (!fitted) { fitted = true; fit(true); }
+  draw();
 }).observe(cv);
-(document.fonts ? document.fonts.ready : Promise.resolve()).then(redraw);
+// Labels were measured before Inter loaded: measure again, and refit unless
+// the view has been moved already.
+let moved = false;
+cv.addEventListener("pointerdown", () => { moved = true; });
+cv.addEventListener("wheel", () => { moved = true; });
+(document.fonts ? document.fonts.ready : Promise.resolve()).then(() => {
+  relayout();
+  if (fitted && !moved) fit(true);
+  if (W) draw();
+});
 </script>
 </body>
 </html>
