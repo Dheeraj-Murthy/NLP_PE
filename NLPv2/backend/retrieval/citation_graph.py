@@ -309,7 +309,14 @@ class CitationGraphManager:
         }
 
     def _mem_neighbors(
-        self, judgment_id: int, direction: str, relationship: Optional[str], limit: int, offset: int
+        self,
+        judgment_id: int,
+        direction: str,
+        relationship: Optional[str],
+        limit: int,
+        offset: int,
+        q: Optional[str] = None,
+        court: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         self._mem_load()
         if judgment_id not in self.graph:
@@ -327,14 +334,20 @@ class CitationGraphManager:
             if other == judgment_id or (relationship and rel != relationship):
                 continue
             node = self.graph.nodes[other]
+            label = node.get("label", f"Case #{other}")
+            cited_text = data.get("cited_text", "")
+            if q and q.lower() not in label.lower() and q.lower() not in cited_text.lower():
+                continue
+            if court and court.lower() not in (node.get("court") or "").lower():
+                continue
             items.append(
                 {
                     "judgment_id": other,
-                    "label": node.get("label", f"Case #{other}"),
+                    "label": label,
                     "court": node.get("court"),
                     "date": node.get("date"),
                     "relationship": rel,
-                    "cited_text": data.get("cited_text", ""),
+                    "cited_text": cited_text,
                     "pagerank_score": round(scores.get(other, 0.0), 6),
                 }
             )
@@ -437,14 +450,18 @@ class CitationGraphManager:
         relationship: Optional[str] = None,
         limit: int = 25,
         offset: int = 0,
+        q: Optional[str] = None,
+        court: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """One page of the cases a judgment cites (direction="cites") or that
-        cite it ("cited_by"), most important first. None if it doesn't exist."""
+        cite it ("cited_by"), most important first. q filters on the case name
+        or citation text and court on the court name (case-insensitive
+        substrings). None if it doesn't exist."""
         if direction not in ("cites", "cited_by"):
             raise ValueError("direction must be 'cites' or 'cited_by'")
         if self._use_postgres():
-            return self._pg.neighbors(judgment_id, direction, relationship, limit, offset)
-        return self._mem_neighbors(judgment_id, direction, relationship, limit, offset)
+            return self._pg.neighbors(judgment_id, direction, relationship, limit, offset, q, court)
+        return self._mem_neighbors(judgment_id, direction, relationship, limit, offset, q, court)
 
     # Display order for relationship groups in the mind map, strongest first.
     RELATIONSHIP_ORDER = ["overruled", "followed", "distinguished", "referred", "cited"]

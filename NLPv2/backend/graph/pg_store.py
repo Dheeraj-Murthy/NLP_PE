@@ -48,6 +48,12 @@ def make_label(petitioner: Optional[str], respondent: Optional[str]) -> str:
     return f"{petitioner or 'Unknown'} v. {respondent or 'Unknown'}"
 
 
+def _like(text: str) -> str:
+    """An ILIKE pattern matching text anywhere, with its wildcards escaped."""
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 class PostgresGraphStore:
     def __init__(self, conn_kwargs: Dict[str, Any], max_connections: int = 5):
         self._conn_kwargs = conn_kwargs
@@ -361,10 +367,14 @@ class PostgresGraphStore:
         relationship: Optional[str] = None,
         limit: int = 25,
         offset: int = 0,
+        q: Optional[str] = None,
+        court: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """One page of the cases a judgment cites (direction="cites") or that
-        cite it ("cited_by"), most important first. None if the judgment
-        doesn't exist."""
+        cite it ("cited_by"), most important first. q matches the case name
+        or the citation text, court the court name (both case-insensitive
+        substrings); total counts the matches. None if the judgment doesn't
+        exist."""
         mine, other = (
             ("source_judgment_id", "target_judgment_id")
             if direction == "cites"
@@ -374,7 +384,21 @@ class PostgresGraphStore:
         stats = self._stats_ready()
         order = "COALESCE(s.pagerank, 0) DESC, n.rank, n.id" if stats else "n.rank, n.id"
         stats_join = "LEFT JOIN judgment_graph_stats s ON s.judgment_id = n.id" if stats else ""
-        params: List[Any] = [judgment_id] + ([relationship] if relationship else []) + [limit, offset]
+        where, where_params = [], []
+        if q:
+            # Same text as make_label, so "X v. Y" searches match what the table shows.
+            where.append(
+                "((COALESCE(j.petitioner, 'Unknown') || ' v. ' || COALESCE(j.respondent, 'Unknown')) ILIKE %s"
+                " OR n.cited_text ILIKE %s)"
+            )
+            where_params += [_like(q)] * 2
+        if court:
+            where.append("j.court ILIKE %s")
+            where_params.append(_like(court))
+        outer_filter = ("WHERE " + " AND ".join(where)) if where else ""
+        params: List[Any] = (
+            [judgment_id] + ([relationship] if relationship else []) + where_params + [limit, offset]
+        )
 
         with self._cursor() as cur:
             if not self._exists(cur, judgment_id):
@@ -393,6 +417,7 @@ class PostgresGraphStore:
                 ) n
                 JOIN judgments j ON j.id = n.id
                 {stats_join}
+                {outer_filter}
                 ORDER BY {order}
                 LIMIT %s OFFSET %s
                 """,

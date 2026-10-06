@@ -73,6 +73,12 @@ def test_citation_graph_manager():
     assert case3["id"] == 3 and [b["count"] for b in case3["children"]] == [1], "Root is left out of a child's branches"
     assert gm.get_mind_map(99) is None
 
+    # Test neighbour search / filters (the mind map's network table)
+    assert gm.get_neighbors(1, "cited_by", q="gandhi v. union")["total"] == 1
+    assert gm.get_neighbors(1, "cited_by", q="1973 sc")["items"][0]["judgment_id"] == 3, "q matches citation text"
+    assert gm.get_neighbors(1, "cited_by", court="supreme")["total"] == 2
+    assert gm.get_neighbors(1, "cited_by", q="nothing like this")["total"] == 0
+
     print("✓ CitationGraphManager synthetic test passed!")
 
 

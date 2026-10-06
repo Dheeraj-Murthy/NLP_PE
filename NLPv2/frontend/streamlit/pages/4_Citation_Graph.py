@@ -37,6 +37,13 @@ st.title("Citation graph", icon=":material/account_tree:")
 st.caption("Browse landmark cases and precedent networks derived from the judgment citation graph.")
 
 NEIGHBOR_PAGE = 25
+NETWORK_PAGE = 50
+# Most cases per branch the mind map draws (the API allows up to 50). Past
+# this the map gets crowded, so bigger neighbourhoods are pointed to the
+# network table under it.
+MIND_MAP_CAP = 30
+MIND_MAP_MIN = 4
+RELATIONSHIPS = ["overruled", "followed", "distinguished", "referred", "cited"]
 
 st.session_state.setdefault("graph_focus", None)
 st.session_state.setdefault("graph_trail", [])
@@ -81,9 +88,90 @@ def _mind_map(judgment_id: int, per_branch: int):
     return api_client.graph_mind_map(judgment_id, per_branch=per_branch)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner="Loading cases…")
 def _neighbors(judgment_id: int, direction: str, offset: int):
     return api_client.graph_neighbors(judgment_id, direction=direction, limit=NEIGHBOR_PAGE, offset=offset)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _neighbor_totals(judgment_id: int) -> tuple:
+    """How many cases a judgment cites and is cited by."""
+    cites = api_client.graph_neighbors(judgment_id, direction="cites", limit=1)
+    cited_by = api_client.graph_neighbors(judgment_id, direction="cited-by", limit=1)
+    return cites["total"], cited_by["total"]
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _network_page(judgment_id: int, direction: str, relationship, q, court, offset: int):
+    return api_client.graph_neighbors(
+        judgment_id, direction=direction, limit=NETWORK_PAGE, offset=offset, relationship=relationship, q=q, court=court
+    )
+
+
+def _network_table(judgment_id: int, n_cites: int, n_cited_by: int) -> None:
+    """Every case around the judgment, searchable and filterable, for
+    neighbourhoods too big to read off the mind map."""
+    st.subheader("Network table")
+    with st.container(horizontal=True):
+        direction = st.segmented_control(
+            "Direction",
+            ["cited-by", "cites"],
+            format_func=lambda d: f"Cited by ({n_cited_by:,})" if d == "cited-by" else f"Cites ({n_cites:,})",
+            default="cited-by" if n_cited_by >= n_cites else "cites",
+            key="net_direction",
+        ) or "cited-by"
+        q = st.text_input("Search", placeholder="Case name or citation", key="net_q").strip() or None
+        relationship = st.selectbox("Relationship", ["All"] + RELATIONSHIPS, key="net_rel")
+        relationship = None if relationship == "All" else relationship
+        court = st.text_input("Court", placeholder="e.g. Supreme Court", key="net_court").strip() or None
+
+    # Back to the first page whenever the case or a filter changes.
+    filters = (judgment_id, direction, relationship, q, court)
+    if st.session_state.get("net_filters") != filters:
+        st.session_state["net_filters"] = filters
+        st.session_state["net_offset"] = 0
+    offset = st.session_state["net_offset"]
+
+    try:
+        with st.spinner("Loading cases…"):
+            page = _network_page(judgment_id, direction, relationship, q, court, offset)
+    except Exception as e:
+        render_api_error(e)
+        return
+    total = page["total"]
+    if not page["items"]:
+        st.caption("No cases match these filters." if (q or relationship or court) else "None found.")
+        return
+
+    with st.spinner("Rendering table…"):
+        st.dataframe(
+            page["items"],
+            column_order=["judgment_id", "label", "relationship", "court", "date", "pagerank_score", "cited_text"],
+            width="stretch",
+            hide_index=True,
+        )
+    with st.container(horizontal=True):
+        st.button(
+            "Previous",
+            key="net_prev",
+            disabled=offset == 0,
+            on_click=lambda: st.session_state.update(net_offset=max(0, offset - NETWORK_PAGE)),
+        )
+        st.caption(f"{offset + 1}–{offset + len(page['items'])} of {total:,}")
+        st.button(
+            "Next",
+            key="net_next",
+            disabled=offset + NETWORK_PAGE >= total,
+            on_click=lambda: st.session_state.update(net_offset=offset + NETWORK_PAGE),
+        )
+    choices = {f"{i['label']} (#{i['judgment_id']})": (i["judgment_id"], i["label"]) for i in page["items"]}
+    st.selectbox(
+        "Map a case from this page",
+        ["—"] + list(choices.keys()),
+        key="net_open",
+        on_change=_focus_from,
+        args=("net_open", choices, True),
+    )
 
 
 query = st.text_input(
@@ -119,7 +207,8 @@ with tab_map:
         "The case's precedents at a glance: what it cites and what cites it, grouped by how they were treated. "
         "Click a node to open or close it, click a case for its details."
     )
-    with st.container(horizontal=True):
+    controls = st.container(horizontal=True)
+    with controls:
         map_id = st.number_input(
             "Judgment ID",
             min_value=1,
@@ -128,20 +217,40 @@ with tab_map:
             placeholder="Search above or type an ID",
             key=f"map_center_{st.session_state['graph_focus']}",
         )
-        per_branch = st.slider(
-            "Cases per branch",
-            min_value=4,
-            max_value=30,
-            value=12,
-            help="The most important cases on each side are shown; the rest are summarised as “+N more”.",
-        )
     if map_id is None:
         st.caption("Search for a case above, or pick one from Landmark cases, to map its precedents.")
     else:
         try:
-            render_mind_map(_mind_map(int(map_id), per_branch), height=660)
+            n_cites, n_cited_by = _neighbor_totals(int(map_id))
         except Exception as e:
             render_api_error(e)
+            n_cites = n_cited_by = None
+        if n_cites is not None:
+            # The slider runs up to the case's larger side, capped, so small
+            # cases don't offer settings that change nothing.
+            largest = max(n_cites, n_cited_by)
+            if largest <= MIND_MAP_MIN:
+                per_branch = max(largest, 1)
+            else:
+                with controls:
+                    per_branch = st.slider(
+                        "Cases per branch",
+                        min_value=MIND_MAP_MIN,
+                        max_value=min(largest, MIND_MAP_CAP),
+                        value=min(12, largest, MIND_MAP_CAP),
+                        help="The most important cases on each side are shown; the rest are summarised as “+N more”.",
+                    )
+            if largest > MIND_MAP_CAP:
+                st.info(
+                    f"This case cites {n_cites:,} cases and is cited by {n_cited_by:,}. The mind map shows at most "
+                    f"{MIND_MAP_CAP} per branch — use the network table below to search and filter all of them.",
+                    icon=":material/table_rows:",
+                )
+            try:
+                render_mind_map(_mind_map(int(map_id), per_branch), height=660)
+            except Exception as e:
+                render_api_error(e)
+            _network_table(int(map_id), n_cites, n_cited_by)
 
 with tab_landmarks:
     st.caption("Top authority cases by PageRank centrality over the citation network.")
@@ -199,7 +308,8 @@ with tab_ego:
 
     if st.button("Load ego graph", icon=":material/play_arrow:", type="primary"):
         try:
-            data = api_client.graph_judgment(int(judgment_id), depth=depth, max_nodes=int(max_nodes))
+            with st.spinner("Loading network…"):
+                data = api_client.graph_judgment(int(judgment_id), depth=depth, max_nodes=int(max_nodes))
             nodes = data.get("nodes", [])
             edges = data.get("edges", [])
 
@@ -214,7 +324,8 @@ with tab_ego:
                     )
                 if len(edges) > EDGE_LABEL_LIMIT:
                     st.caption("Edge labels hidden for large graphs — see the edges table below.")
-                st.graphviz_chart(_build_dot(nodes, edges))
+                with st.spinner("Drawing network…"):
+                    st.graphviz_chart(_build_dot(nodes, edges))
                 with st.expander(f"Edges ({len(edges)})", icon=":material/list:"):
                     st.dataframe(edges, width="stretch")
         except Exception as e:

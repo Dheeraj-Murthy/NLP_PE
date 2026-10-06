@@ -381,13 +381,13 @@ async def search_cases(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _neighbors_response(judgment_id: int, direction: str, relationship, limit: int, offset: int):
+def _neighbors_response(judgment_id: int, direction: str, relationship, limit: int, offset: int, q, court):
     if not graph_manager:
         raise HTTPException(status_code=500, detail="Graph manager not initialized")
 
     try:
         page = graph_manager.get_neighbors(
-            judgment_id, direction=direction, relationship=relationship, limit=limit, offset=offset
+            judgment_id, direction=direction, relationship=relationship, limit=limit, offset=offset, q=q, court=court
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -402,9 +402,11 @@ async def get_cases_cited(
     relationship: Optional[str] = None,
     limit: int = Query(25, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    q: Optional[str] = Query(None, max_length=300, description="Case name or citation text contains"),
+    court: Optional[str] = Query(None, max_length=200, description="Court name contains"),
 ):
     """Paged list of the cases this judgment cites, most important first."""
-    return _neighbors_response(judgment_id, "cites", relationship, limit, offset)
+    return _neighbors_response(judgment_id, "cites", relationship, limit, offset, q, court)
 
 
 @app.get("/graph/judgment/{judgment_id}/cited-by")
@@ -413,9 +415,11 @@ async def get_citing_cases(
     relationship: Optional[str] = None,
     limit: int = Query(25, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    q: Optional[str] = Query(None, max_length=300, description="Case name or citation text contains"),
+    court: Optional[str] = Query(None, max_length=200, description="Court name contains"),
 ):
     """Paged list of the cases that cite this judgment, most important first."""
-    return _neighbors_response(judgment_id, "cited_by", relationship, limit, offset)
+    return _neighbors_response(judgment_id, "cited_by", relationship, limit, offset, q, court)
 
 
 @app.get("/graph/judgment/{judgment_id}/mind-map")

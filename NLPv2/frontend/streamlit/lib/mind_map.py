@@ -353,7 +353,9 @@ function fit(minK = 0) {
 
 document.getElementById("expand").onclick = () => { setAll(TREE, true); render(null); fit(0.7); };
 document.getElementById("collapse").onclick = () => { resetOpen(TREE); render(null); fit(); };
-document.getElementById("fit").onclick = fit;
+// Not "onclick = fit": the click event would arrive as minK and turn the
+// transform into NaN, after which the map can no longer be panned.
+document.getElementById("fit").onclick = () => fit();
 
 // Pan and zoom.
 let drag = null, dragged = false;

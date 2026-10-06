@@ -267,11 +267,18 @@ def graph_neighbors(
     limit: int = 25,
     offset: int = 0,
     relationship: Optional[str] = None,
+    q: Optional[str] = None,
+    court: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """direction: "cites" (cases this judgment cites) or "cited-by"."""
+    """direction: "cites" (cases this judgment cites) or "cited-by". q filters
+    on case name or citation text, court on the court name."""
     params: Dict[str, Any] = {"limit": limit, "offset": offset}
     if relationship:
         params["relationship"] = relationship
+    if q:
+        params["q"] = q
+    if court:
+        params["court"] = court
     try:
         resp = requests.get(
             _url(f"/graph/judgment/{judgment_id}/{direction}"),
