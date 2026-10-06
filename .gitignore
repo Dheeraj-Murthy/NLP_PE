@@ -158,6 +158,9 @@ storage/
 .run/
 logs/
 
+# benchmark run output (regenerated per run; gold_set.json itself is tracked)
+NLPv2/backend/benchmark/reports/
+
 # =========================
 # Misc
 # =========================

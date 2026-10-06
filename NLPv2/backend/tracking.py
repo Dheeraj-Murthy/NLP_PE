@@ -10,6 +10,7 @@ except ImportError:
 TRACKING_URI = "sqlite:///mlflow.db"
 EXPERIMENT_NAME = "legal-rag-queries"
 INGESTION_EXPERIMENT_NAME = "legal-rag-ingestion"
+BENCHMARK_EXPERIMENT_NAME = "legal-rag-benchmarks"
 
 if MLFLOW_AVAILABLE:
     mlflow.set_tracking_uri(TRACKING_URI)
@@ -59,6 +60,28 @@ def log_ingestion_run(script: str, params: Dict[str, Any], metrics: Dict[str, An
         return
     try:
         experiment_id = _experiment_id(INGESTION_EXPERIMENT_NAME)
+        with mlflow.start_run(run_name=script, experiment_id=experiment_id):
+            mlflow.log_param("script", script)
+            for k, v in params.items():
+                if v is not None:
+                    mlflow.log_param(k, v)
+            for k, v in metrics.items():
+                if isinstance(v, (int, float)) and v is not None:
+                    mlflow.log_metric(k, v)
+    except Exception:
+        pass
+
+
+def log_benchmark_run(script: str, params: Dict[str, Any], metrics: Dict[str, Any]) -> None:
+    """Log one benchmark run (benchmark/retrieval_eval.py, future
+    benchmark/answer_eval.py) as an MLflow run, under its own experiment so
+    repeated benchmark runs are comparable as retrieval config or the
+    corpus changes, without mixing into live query or ingestion traffic.
+    Never raises, same reasoning as log_query_run/log_ingestion_run."""
+    if not MLFLOW_AVAILABLE:
+        return
+    try:
+        experiment_id = _experiment_id(BENCHMARK_EXPERIMENT_NAME)
         with mlflow.start_run(run_name=script, experiment_id=experiment_id):
             mlflow.log_param("script", script)
             for k, v in params.items():
