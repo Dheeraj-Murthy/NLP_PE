@@ -10,17 +10,34 @@ nothing leaves the machine. Pass --model claude-*/gpt-*/gemini-* plus
 --external-ok to use an external API instead (same opt-in gate
 rag_pipeline.py's _resolve_backend uses for those backends).
 
+Two quality guards, since a gold set this benchmark trusts blindly is worse
+than no benchmark at all:
+  - Garbled-content filter: skips chunks that are mostly non-ASCII, a sign
+    of pdftotext mis-extraction (mojibake), not real judgment text.
+  - Question/content overlap check: rejects a generated question that
+    shares almost no vocabulary with its source chunk (the LLM drifting
+    into a vague or only tangentially related question) and tries a
+    different chunk from the same section instead.
+  - content_hash + corpus snapshot counts are recorded so retrieval_eval.py
+    can detect a gold set that's gone stale — e.g. after a schema reset and
+    full re-ingest reassigns every chunk_id from scratch, this file's
+    source_chunk_id references would otherwise silently point at different
+    (or missing) content and corrupt every metric without any error.
+
 Usage:
     cd NLPv2/backend
     python benchmark/generate_gold_set.py --n 80 --seed 42
     python benchmark/generate_gold_set.py --n 80 --model claude-sonnet-5 --external-ok
 """
 import argparse
+import hashlib
 import json
 import os
 import random
+import re
 import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import psycopg2
@@ -37,13 +54,24 @@ SECTIONS = ["facts", "issues", "arguments", "ratio", "judgment"]
 MAX_CHUNKS_PER_JUDGMENT = 2
 MIN_CHUNK_CHARS = 200  # skip near-empty chunks that can't support a real question
 MAX_NON_ASCII_RATIO = 0.2  # skip chunks with garbled/mis-encoded PDF extraction
+MIN_QUESTION_OVERLAP = 0.25  # min fraction of non-trivial question words found in the chunk
+MAX_ATTEMPTS_PER_SECTION_MULTIPLIER = 4  # how many extra candidates to try per section before giving up
 
 GOLD_GEN_SYSTEM_PROMPT = (
     "You are generating evaluation data for a legal search system. Given an "
     "excerpt from the '{section}' portion of an Indian court judgment, write "
     "ONE natural-language question a lawyer might ask that this excerpt "
-    "specifically and directly answers. Return only the question, nothing else."
+    "specifically and directly answers, using the same names, terms, and "
+    "specifics that appear in the excerpt. Return only the question, nothing else."
 )
+
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "is", "are",
+    "was", "were", "does", "did", "do", "what", "which", "who", "whom", "how",
+    "why", "when", "where", "under", "according", "that", "this", "these",
+    "those", "it", "its", "be", "been", "being", "can", "could", "would",
+    "should", "will", "shall", "with", "by", "as", "at", "from", "not", "any",
+}
 
 DEFAULT_OUTPUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "gold_set.json")
 
@@ -60,24 +88,43 @@ def _default_db_connection_string() -> str:
     return f"host={host} port={port} dbname={dbname} user={user} password={password}"
 
 
+def _content_hash(content: str) -> str:
+    return hashlib.md5(content.encode("utf-8")).hexdigest()
+
+
 def _is_garbled(content: str) -> bool:
     """Flags chunks with a high proportion of non-ASCII characters — this
     corpus is all-English Supreme Court judgments, so a chunk heavy in
     non-Latin codepoints is a pdftotext font-encoding mis-extraction
     (mojibake), not real content, and would waste a gold query on
-    something not even a human can read."""
+    something not even a human can read.
+
+    Threshold is ord(ch) > 127 (true non-ASCII), not some higher cutoff —
+    Bengali/Devanagari/Tamil etc. all live at U+0900-U+0FFF (2304-4095),
+    well under a cutoff like 0x2000 (8192) that only catches CJK and
+    similarly high-codepoint scripts. A higher cutoff would silently let
+    exactly the Indic-script mojibake this corpus actually produces
+    through the filter."""
     if not content:
         return True
-    non_ascii = sum(1 for ch in content if ord(ch) > 0x2000)
+    non_ascii = sum(1 for ch in content if ord(ch) > 127)
     return (non_ascii / len(content)) > MAX_NON_ASCII_RATIO
 
 
+def _question_overlap(question: str, content: str) -> float:
+    """Fraction of the question's non-trivial words that actually appear in
+    the source chunk. Mirrors post_processor.py's lexical-overlap heuristic
+    (answer_words & context_words), applied here to catch a generated
+    question that's too vague or has drifted from what the excerpt says."""
+    q_words = {w for w in re.findall(r"[a-z]+", question.lower()) if w not in _STOPWORDS and len(w) > 2}
+    if not q_words:
+        return 0.0
+    c_words = {w for w in re.findall(r"[a-z]+", content.lower())}
+    return len(q_words & c_words) / len(q_words)
+
+
 def _fetch_all_chunks(cur) -> List[Dict[str, Any]]:
-    cur.execute(
-        "SELECT chunk_id, judgment_id, section, content "
-        "FROM judgment_chunks WHERE length(content) > %s",
-        (MIN_CHUNK_CHARS,),
-    )
+    cur.execute("SELECT chunk_id, judgment_id, section, content FROM judgment_chunks WHERE length(content) > %s", (MIN_CHUNK_CHARS,))
     return [
         {"chunk_id": r[0], "judgment_id": r[1], "section": r[2], "content": r[3]}
         for r in cur.fetchall()
@@ -85,36 +132,27 @@ def _fetch_all_chunks(cur) -> List[Dict[str, Any]]:
     ]
 
 
-def sample_chunks(cur, n: int, seed: int) -> List[Dict[str, Any]]:
-    """Stratified sample across `section` values, capped at
-    MAX_CHUNKS_PER_JUDGMENT per judgment_id so a handful of long judgments
-    can't dominate the gold set."""
+def _corpus_counts(cur) -> Dict[str, int]:
+    cur.execute("SELECT count(*) FROM judgments")
+    judgment_count = cur.fetchone()[0]
+    cur.execute("SELECT count(*) FROM judgment_chunks")
+    chunk_count = cur.fetchone()[0]
+    return {"judgment_count": judgment_count, "chunk_count": chunk_count}
+
+
+def _candidate_pool(cur, seed: int) -> Dict[str, List[Dict[str, Any]]]:
+    """All eligible chunks, bucketed and shuffled by section. Each bucket is
+    a queue of candidates to draw from — more than the final quota, so
+    build_gold_set can skip a low-quality question and move to the next
+    candidate without re-querying the database."""
     rng = random.Random(seed)
     all_chunks = _fetch_all_chunks(cur)
-
     by_section: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for chunk in all_chunks:
         by_section[chunk["section"]].append(chunk)
     for bucket in by_section.values():
         rng.shuffle(bucket)
-
-    per_section = max(n // len(SECTIONS), 1)
-    judgment_counts: Dict[int, int] = defaultdict(int)
-    sampled: List[Dict[str, Any]] = []
-
-    for section in SECTIONS:
-        taken = 0
-        for chunk in by_section.get(section, []):
-            if taken >= per_section or len(sampled) >= n:
-                break
-            if judgment_counts[chunk["judgment_id"]] >= MAX_CHUNKS_PER_JUDGMENT:
-                continue
-            sampled.append(chunk)
-            judgment_counts[chunk["judgment_id"]] += 1
-            taken += 1
-
-    rng.shuffle(sampled)
-    return sampled[:n]
+    return by_section
 
 
 def _resolve_backend(model: Optional[str], external_ok: bool, api_key: Optional[str]) -> LLMBackend:
@@ -165,30 +203,67 @@ def build_gold_record(chunk: Dict[str, Any], question: str, model_id: str) -> Di
         "source_chunk_id": chunk["chunk_id"],
         "source_judgment_id": chunk["judgment_id"],
         "section": chunk["section"],
+        "content_hash": _content_hash(chunk["content"]),
         "generator_model": model_id,
     }
 
 
 def build_gold_set(
     n: int, seed: int, model: Optional[str], external_ok: bool, api_key: Optional[str]
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     conn = psycopg2.connect(_default_db_connection_string())
     try:
         cur = conn.cursor()
         try:
-            chunks = sample_chunks(cur, n, seed)
+            by_section = _candidate_pool(cur, seed)
+            corpus_counts = _corpus_counts(cur)
         finally:
             cur.close()
     finally:
         conn.close()
 
     backend = _resolve_backend(model, external_ok, api_key)
-    records = []
-    for i, chunk in enumerate(chunks, 1):
-        question = generate_question_for_chunk(backend, chunk)
-        records.append(build_gold_record(chunk, question, backend.model_id))
-        print(f"[{i}/{len(chunks)}] chunk {chunk['chunk_id']} ({chunk['section']}): {question}")
-    return records
+    per_section = max(n // len(SECTIONS), 1)
+    max_attempts_per_section = per_section * MAX_ATTEMPTS_PER_SECTION_MULTIPLIER
+    judgment_counts: Dict[int, int] = defaultdict(int)
+
+    records: List[Dict[str, Any]] = []
+    skipped_overlap = 0
+    for section in SECTIONS:
+        accepted = 0
+        attempts = 0
+        for chunk in by_section.get(section, []):
+            if accepted >= per_section or len(records) >= n or attempts >= max_attempts_per_section:
+                break
+            if judgment_counts[chunk["judgment_id"]] >= MAX_CHUNKS_PER_JUDGMENT:
+                continue
+            attempts += 1
+
+            question = generate_question_for_chunk(backend, chunk)
+            overlap = _question_overlap(question, chunk["content"])
+            if overlap < MIN_QUESTION_OVERLAP:
+                skipped_overlap += 1
+                print(
+                    f"  [skip] chunk {chunk['chunk_id']} ({section}): overlap={overlap:.2f} "
+                    f"< {MIN_QUESTION_OVERLAP} — {question}"
+                )
+                continue
+
+            judgment_counts[chunk["judgment_id"]] += 1
+            accepted += 1
+            records.append(build_gold_record(chunk, question, backend.model_id))
+            print(f"[{len(records)}/{n}] chunk {chunk['chunk_id']} ({section}, overlap={overlap:.2f}): {question}")
+
+    random.Random(seed).shuffle(records)
+    print(f"\n{len(records)} accepted, {skipped_overlap} skipped for low question/content overlap")
+
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generator_model": backend.model_id,
+        "corpus_judgment_count": corpus_counts["judgment_count"],
+        "corpus_chunk_count": corpus_counts["chunk_count"],
+        "records": records,
+    }
 
 
 def main() -> None:
@@ -223,13 +298,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    records = build_gold_set(args.n, args.seed, args.model, args.external_ok, args.api_key)
+    gold_set = build_gold_set(args.n, args.seed, args.model, args.external_ok, args.api_key)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w") as f:
-        json.dump(records, f, indent=2)
+        json.dump(gold_set, f, indent=2)
 
-    print(f"\nWrote {len(records)} gold records to {args.output}")
+    print(f"\nWrote {len(gold_set['records'])} gold records to {args.output}")
 
 
 if __name__ == "__main__":

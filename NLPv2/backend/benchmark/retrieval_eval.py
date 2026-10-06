@@ -16,6 +16,21 @@ real stage-1 call always uses the hardcoded 0.2). Using 0.3 here would
 silently benchmark a different configuration than what the live pipeline
 actually runs.
 
+Before scoring, every gold record is checked against the live DB
+(validate_gold_set): a SERIAL chunk_id is not stable across a schema reset
++ full re-ingest, so a gold set generated before one would otherwise be
+scored against wrong or missing chunks with no error at all. Stale records
+are excluded from every metric and reported separately rather than
+silently skewing the numbers.
+
+Reports both CHUNK-level metrics (did we get back the exact source chunk)
+and JUDGMENT-level metrics (did we get back the right case at all, in any
+chunk) — a query whose retrieved top-k includes the correct judgment but a
+different paragraph is a much more benign failure than missing the case
+entirely, and chunk-only recall can't tell the two apart. Also reports a
+per-section breakdown, since facts/issues (extractive) and arguments/ratio
+(interpretive) are inherently different difficulty.
+
 No LLM is loaded — LegalRetriever only loads the BGE encoder and
 CrossEncoderReranker only loads the MiniLM cross-encoder, so this is
 inherently CPU-safe.
@@ -25,10 +40,12 @@ Usage:
     python benchmark/retrieval_eval.py --gold benchmark/data/gold_set.json
 """
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
+from collections import defaultdict
 from typing import Any, Dict, List, Sequence, Tuple
 
 # Add backend/ to the path so the dotted `retrieval.*` subpackage import and
@@ -36,6 +53,8 @@ from typing import Any, Dict, List, Sequence, Tuple
 # directly or as a module — same shim as backend/tests/smoke_test_citation_graph.py.
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _backend_dir)
+
+import psycopg2  # noqa: E402
 
 from retrieval.retriever import LegalRetriever  # noqa: E402
 from retrieval.reranker import CrossEncoderReranker  # noqa: E402
@@ -46,9 +65,63 @@ from metrics import aggregate, rank_of  # noqa: E402
 DEFAULT_K_VALUES = (5, 8, 10, 30)
 
 
-def load_gold_set(path: str) -> List[Dict[str, Any]]:
+def _default_db_connection_string() -> str:
+    """Build the default DSN from env vars — same convention as
+    retrieval/retriever.py's private helper (each module builds its own
+    connection; there's no shared db.py in this repo)."""
+    host = os.environ.get("DB_HOST", "localhost")
+    port = os.environ.get("DB_PORT", "5433")
+    dbname = os.environ.get("DB_NAME", "legal_rag")
+    user = os.environ.get("DB_USER", "postgres")
+    password = os.environ.get("DB_PASSWORD", "postgres")
+    return f"host={host} port={port} dbname={dbname} user={user} password={password}"
+
+
+def _content_hash(content: str) -> str:
+    return hashlib.md5(content.encode("utf-8")).hexdigest()
+
+
+def load_gold_set(path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Returns (records, metadata). Accepts both the current
+    {"records": [...], "generated_at": ..., ...} shape and a bare list, for
+    a gold set generated before generate_gold_set.py added metadata."""
     with open(path) as f:
-        return json.load(f)
+        data = json.load(f)
+    if isinstance(data, list):
+        return data, {}
+    return data["records"], {k: v for k, v in data.items() if k != "records"}
+
+
+def validate_gold_set(
+    records: List[Dict[str, Any]], conn
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Checks each gold record's source_chunk_id still points at the same
+    judgment/section/content it was generated from. A schema reset + full
+    re-ingest reassigns every chunk_id from a fresh SERIAL sequence, so
+    without this check a stale gold set would silently score against wrong
+    or missing chunks instead of failing loudly. Returns (valid, stale)."""
+    chunk_ids = [r["source_chunk_id"] for r in records]
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT chunk_id, judgment_id, section, content FROM judgment_chunks WHERE chunk_id = ANY(%s)",
+        (chunk_ids,),
+    )
+    live = {row[0]: {"judgment_id": row[1], "section": row[2], "content": row[3]} for row in cur.fetchall()}
+    cur.close()
+
+    valid: List[Dict[str, Any]] = []
+    stale: List[Dict[str, Any]] = []
+    for r in records:
+        row = live.get(r["source_chunk_id"])
+        if row is None:
+            stale.append({**r, "stale_reason": "chunk_id no longer exists"})
+        elif row["judgment_id"] != r["source_judgment_id"] or row["section"] != r["section"]:
+            stale.append({**r, "stale_reason": "chunk_id now belongs to a different judgment/section"})
+        elif r.get("content_hash") and _content_hash(row["content"]) != r["content_hash"]:
+            stale.append({**r, "stale_reason": "chunk content changed since gold set generation"})
+        else:
+            valid.append(r)
+    return valid, stale
 
 
 def run_two_stage_retrieval(
@@ -73,24 +146,28 @@ def run_two_stage_retrieval(
 
 
 def evaluate_query(
-    gold: Dict[str, Any], stage1_ids: List[Any], stage2_ids: List[Any], k_values: Sequence[int]
+    gold: Dict[str, Any],
+    stage1_chunk_ids: List[Any],
+    stage2_chunk_ids: List[Any],
+    stage1_judgment_ids: List[Any],
+    stage2_judgment_ids: List[Any],
+    k_values: Sequence[int],
 ) -> Dict[str, Any]:
-    target = gold["source_chunk_id"]
+    target_chunk = gold["source_chunk_id"]
+    target_judgment = gold["source_judgment_id"]
     result: Dict[str, Any] = {
         "query": gold["query"],
-        "source_chunk_id": target,
-        "source_judgment_id": gold["source_judgment_id"],
+        "source_chunk_id": target_chunk,
+        "source_judgment_id": target_judgment,
         "section": gold["section"],
-        "stage1_rank": rank_of(target, stage1_ids),
-        "stage2_rank": rank_of(target, stage2_ids),
+        "stage1_rank": rank_of(target_chunk, stage1_chunk_ids),
+        "stage2_rank": rank_of(target_chunk, stage2_chunk_ids),
+        "stage1_judgment_rank": rank_of(target_judgment, stage1_judgment_ids),
+        "stage2_judgment_rank": rank_of(target_judgment, stage2_judgment_ids),
     }
     for k in k_values:
-        result[f"stage1_recall@{k}"] = int(
-            result["stage1_rank"] is not None and result["stage1_rank"] <= k
-        )
-        result[f"stage2_recall@{k}"] = int(
-            result["stage2_rank"] is not None and result["stage2_rank"] <= k
-        )
+        result[f"stage1_recall@{k}"] = int(result["stage1_rank"] is not None and result["stage1_rank"] <= k)
+        result[f"stage2_recall@{k}"] = int(result["stage2_rank"] is not None and result["stage2_rank"] <= k)
     return result
 
 
@@ -102,8 +179,20 @@ def run_eval(
     graph_boost: float = 0.0,
     k_values: Sequence[int] = DEFAULT_K_VALUES,
 ) -> Dict[str, Any]:
-    gold_set = load_gold_set(gold_path)
+    records, gold_meta = load_gold_set(gold_path)
     k_values = sorted(set(k_values))
+
+    conn = psycopg2.connect(_default_db_connection_string())
+    try:
+        valid_records, stale_records = validate_gold_set(records, conn)
+        cur = conn.cursor()
+        cur.execute("SELECT count(*) FROM judgments")
+        current_judgment_count = cur.fetchone()[0]
+        cur.execute("SELECT count(*) FROM judgment_chunks")
+        current_chunk_count = cur.fetchone()[0]
+        cur.close()
+    finally:
+        conn.close()
 
     # Load real models ONCE — BGE encoder + MiniLM cross-encoder are
     # expensive to construct; never re-instantiate per query.
@@ -113,20 +202,43 @@ def run_eval(
     per_query = []
     stage1_pairs: List[Tuple[Any, List[Any]]] = []
     stage2_pairs: List[Tuple[Any, List[Any]]] = []
+    stage1_judgment_pairs: List[Tuple[Any, List[Any]]] = []
+    stage2_judgment_pairs: List[Tuple[Any, List[Any]]] = []
+    section_stage1_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
+    section_stage2_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
 
     start = time.time()
-    for gold in gold_set:
+    for gold in valid_records:
         stage1, stage2 = run_two_stage_retrieval(
             retriever, reranker, gold["query"], candidate_k, threshold, top_k, graph_boost
         )
-        stage1_ids = [c["chunk_id"] for c in stage1]
-        stage2_ids = [c["chunk_id"] for c in stage2]
-        target = gold["source_chunk_id"]
+        stage1_chunk_ids = [c["chunk_id"] for c in stage1]
+        stage2_chunk_ids = [c["chunk_id"] for c in stage2]
+        stage1_judgment_ids = [c["judgment_id"] for c in stage1]
+        stage2_judgment_ids = [c["judgment_id"] for c in stage2]
+        target_chunk = gold["source_chunk_id"]
+        target_judgment = gold["source_judgment_id"]
 
-        stage1_pairs.append((target, stage1_ids))
-        stage2_pairs.append((target, stage2_ids))
-        per_query.append(evaluate_query(gold, stage1_ids, stage2_ids, k_values))
+        stage1_pairs.append((target_chunk, stage1_chunk_ids))
+        stage2_pairs.append((target_chunk, stage2_chunk_ids))
+        stage1_judgment_pairs.append((target_judgment, stage1_judgment_ids))
+        stage2_judgment_pairs.append((target_judgment, stage2_judgment_ids))
+        section_stage1_pairs[gold["section"]].append((target_chunk, stage1_chunk_ids))
+        section_stage2_pairs[gold["section"]].append((target_chunk, stage2_chunk_ids))
+
+        per_query.append(
+            evaluate_query(gold, stage1_chunk_ids, stage2_chunk_ids, stage1_judgment_ids, stage2_judgment_ids, k_values)
+        )
     elapsed = time.time() - start
+
+    per_section = {
+        section: {
+            "n": len(section_stage1_pairs[section]),
+            "stage1": aggregate(section_stage1_pairs[section], k_values),
+            "stage2": aggregate(section_stage2_pairs[section], k_values),
+        }
+        for section in section_stage1_pairs
+    }
 
     return {
         "config": {
@@ -135,26 +247,40 @@ def run_eval(
             "top_k": top_k,
             "graph_boost": graph_boost,
             "k_values": k_values,
-            "n_queries": len(gold_set),
+            "n_queries": len(valid_records),
+            "n_stale": len(stale_records),
             "elapsed_s": round(elapsed, 2),
         },
+        "gold_set": {
+            **gold_meta,
+            "current_judgment_count": current_judgment_count,
+            "current_chunk_count": current_chunk_count,
+        },
+        "stale_records": stale_records,
         "per_query": per_query,
-        "aggregate_stage1": aggregate(stage1_pairs, k_values),
-        "aggregate_stage2": aggregate(stage2_pairs, k_values),
+        "per_section": per_section,
+        "aggregate_stage1_chunk": aggregate(stage1_pairs, k_values),
+        "aggregate_stage2_chunk": aggregate(stage2_pairs, k_values),
+        "aggregate_stage1_judgment": aggregate(stage1_judgment_pairs, k_values),
+        "aggregate_stage2_judgment": aggregate(stage2_judgment_pairs, k_values),
     }
 
 
-def _flatten_for_mlflow(
-    aggregate_stage1: Dict[str, float], aggregate_stage2: Dict[str, float]
-) -> Dict[str, float]:
+def _flatten_for_mlflow(report: Dict[str, Any]) -> Dict[str, float]:
     # mlflow metric names don't allow "@" — rewrite recall@8 -> recall_at_8
     # for the logged metrics; the JSON report keeps the readable "@" form.
-    flat: Dict[str, float] = {}
-    for k, v in aggregate_stage1.items():
-        flat[f"stage1_{k}".replace("@", "_at_")] = v
-    for k, v in aggregate_stage2.items():
-        flat[f"stage2_{k}".replace("@", "_at_")] = v
+    flat: Dict[str, float] = {"n_stale": report["config"]["n_stale"]}
+    for block_name in ("aggregate_stage1_chunk", "aggregate_stage2_chunk", "aggregate_stage1_judgment", "aggregate_stage2_judgment"):
+        prefix = block_name.replace("aggregate_", "")
+        for k, v in report[block_name].items():
+            flat[f"{prefix}_{k}".replace("@", "_at_")] = v
     return flat
+
+
+def _print_block(title: str, metrics: Dict[str, float]) -> None:
+    print(title)
+    for k, v in metrics.items():
+        print(f"  {k}: {v:.3f}")
 
 
 def main() -> None:
@@ -203,13 +329,33 @@ def main() -> None:
     with open(output, "w") as f:
         json.dump(report, f, indent=2)
 
-    print(f"\nConfig: {report['config']}\n")
-    print("Stage 1 (pre-rerank, hybrid recall):")
-    for k, v in report["aggregate_stage1"].items():
-        print(f"  {k}: {v:.3f}")
-    print("\nStage 2 (post-rerank, final top_k):")
-    for k, v in report["aggregate_stage2"].items():
-        print(f"  {k}: {v:.3f}")
+    n_stale = report["config"]["n_stale"]
+    if n_stale:
+        print(f"WARNING: {n_stale} gold record(s) skipped as stale (see 'stale_records' in the report):")
+        for s in report["stale_records"]:
+            print(f"  chunk {s['source_chunk_id']}: {s['stale_reason']}")
+        print()
+
+    gen_chunk_count = report["gold_set"].get("corpus_chunk_count")
+    cur_chunk_count = report["gold_set"]["current_chunk_count"]
+    if gen_chunk_count is not None and gen_chunk_count != cur_chunk_count:
+        print(f"Note: corpus has {cur_chunk_count} chunks now vs {gen_chunk_count} when the gold set was generated.\n")
+
+    print(f"Config: {report['config']}\n")
+    _print_block("Stage 1 (pre-rerank) — chunk-level:", report["aggregate_stage1_chunk"])
+    _print_block("\nStage 1 (pre-rerank) — judgment-level (right case, any chunk):", report["aggregate_stage1_judgment"])
+    _print_block("\nStage 2 (post-rerank, final top_k) — chunk-level:", report["aggregate_stage2_chunk"])
+    _print_block("\nStage 2 (post-rerank, final top_k) — judgment-level:", report["aggregate_stage2_judgment"])
+
+    print("\nPer-section (stage 2, chunk-level):")
+    for section, block in sorted(report["per_section"].items()):
+        s2 = block["stage2"]
+        print(
+            f"  {section} (n={block['n']}): "
+            f"recall@{args.top_k}={s2.get(f'recall@{args.top_k}', float('nan')):.3f}  "
+            f"mrr={s2.get('mrr', float('nan')):.3f}"
+        )
+
     print(f"\nWrote report to {output}")
 
     tracking.log_benchmark_run(
@@ -221,7 +367,7 @@ def main() -> None:
             "graph_boost": args.graph_boost,
             "n_queries": report["config"]["n_queries"],
         },
-        metrics=_flatten_for_mlflow(report["aggregate_stage1"], report["aggregate_stage2"]),
+        metrics=_flatten_for_mlflow(report),
     )
 
 
