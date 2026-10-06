@@ -2,33 +2,8 @@ import streamlit as st
 
 from lib import api_client
 from lib.mind_map import render_mind_map
+from lib.network_view import render_network
 from lib.ui_helpers import linked_label, render_api_error
-
-
-# Graphviz lays the graph out in the browser, and edge labels are by far the
-# most expensive part of that layout. Past this many edges, drop them and
-# rely on the edges table instead.
-EDGE_LABEL_LIMIT = 60
-
-
-def _build_dot(nodes, edges) -> str:
-    show_edge_labels = len(edges) <= EDGE_LABEL_LIMIT
-    lines = ["digraph {", "  graph [rankdir=LR];", "  node [shape=box];"]
-    for n in nodes:
-        label = n.get("label", f"Case #{n['id']}").replace('"', "'")
-        fill = "#18181B" if n.get("is_center") else "#F4F4F5"
-        font = "#FFFFFF" if n.get("is_center") else "#09090B"
-        lines.append(
-            f'  "{n["id"]}" [label="{label}", style=filled, fillcolor="{fill}", fontcolor="{font}"];'
-        )
-    for e in edges:
-        if show_edge_labels:
-            rel = (e.get("relationship") or "cited").replace('"', "'")
-            lines.append(f'  "{e["source"]}" -> "{e["target"]}" [label="{rel}"];')
-        else:
-            lines.append(f'  "{e["source"]}" -> "{e["target"]}";')
-    lines.append("}")
-    return "\n".join(lines)
 
 
 st.set_page_config(page_title="Citation graph — Legal RAG", page_icon=":material/account_tree:", layout="wide")
@@ -38,10 +13,9 @@ st.caption("Browse landmark cases and precedent networks derived from the judgme
 
 NEIGHBOR_PAGE = 25
 NETWORK_PAGE = 50
-# Most cases per branch the mind map draws (the API allows up to 50). Past
-# this the map gets crowded, so bigger neighbourhoods are pointed to the
-# network table under it.
-MIND_MAP_CAP = 30
+# Most cases per branch the mind map draws (the API's limit). Bigger
+# neighbourhoods are pointed to the network table under it.
+MIND_MAP_CAP = 50
 MIND_MAP_MIN = 4
 RELATIONSHIPS = ["overruled", "followed", "distinguished", "referred", "cited"]
 
@@ -226,8 +200,7 @@ with tab_map:
             render_api_error(e)
             n_cites = n_cited_by = None
         if n_cites is not None:
-            # The slider runs up to the case's larger side, capped, so small
-            # cases don't offer settings that change nothing.
+            # Only cases too small for a slider to change anything go without one.
             largest = max(n_cites, n_cited_by)
             if largest <= MIND_MAP_MIN:
                 per_branch = max(largest, 1)
@@ -236,9 +209,12 @@ with tab_map:
                     per_branch = st.slider(
                         "Cases per branch",
                         min_value=MIND_MAP_MIN,
-                        max_value=min(largest, MIND_MAP_CAP),
-                        value=min(12, largest, MIND_MAP_CAP),
-                        help="The most important cases on each side are shown; the rest are summarised as “+N more”.",
+                        max_value=MIND_MAP_CAP,
+                        value=12,
+                        help=(
+                            f"This case cites {n_cites:,} cases and is cited by {n_cited_by:,}. The most important "
+                            "on each side are shown; the rest are summarised as “+N more”."
+                        ),
                     )
             if largest > MIND_MAP_CAP:
                 st.info(
@@ -310,26 +286,28 @@ with tab_ego:
         try:
             with st.spinner("Loading network…"):
                 data = api_client.graph_judgment(int(judgment_id), depth=depth, max_nodes=int(max_nodes))
-            nodes = data.get("nodes", [])
-            edges = data.get("edges", [])
-
-            if not nodes:
-                st.warning(f"Judgment {judgment_id} not found in the citation graph.", icon=":material/search_off:")
-            else:
-                if data.get("truncated"):
-                    st.info(
-                        f"Showing {len(nodes)} of {data.get('total_nodes')} cases within {depth} hops. "
-                        "Lower the depth or raise Max nodes to see more.",
-                        icon=":material/filter_alt:",
-                    )
-                if len(edges) > EDGE_LABEL_LIMIT:
-                    st.caption("Edge labels hidden for large graphs — see the edges table below.")
-                with st.spinner("Drawing network…"):
-                    st.graphviz_chart(_build_dot(nodes, edges))
-                with st.expander(f"Edges ({len(edges)})", icon=":material/list:"):
-                    st.dataframe(edges, width="stretch")
+            st.session_state["ego_graph"] = data
         except Exception as e:
             render_api_error(e)
+            st.session_state.pop("ego_graph", None)
+
+    # Kept in session state so the graph survives reruns from other widgets on the page.
+    data = st.session_state.get("ego_graph")
+    if data is not None:
+        nodes = data.get("nodes", [])
+        edges = data.get("edges", [])
+        if not nodes:
+            st.warning(f"Judgment {data.get('center_id')} not found in the citation graph.", icon=":material/search_off:")
+        else:
+            if data.get("truncated"):
+                total = f"{data.get('total_nodes'):,}" + ("" if data.get("total_exact", True) else "+")
+                st.info(
+                    f"Showing the closest {len(nodes)} of {total} cases. Lower the depth or raise Max nodes to see more.",
+                    icon=":material/filter_alt:",
+                )
+            render_network(data, height=660)
+            with st.expander(f"Edges ({len(edges)})", icon=":material/list:"):
+                st.dataframe(edges, width="stretch")
 
 with tab_neighbors:
     st.caption("Cases this judgment cites and cases that cite it, most important first. Open one to go a level deeper.")

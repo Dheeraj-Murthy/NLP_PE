@@ -226,16 +226,26 @@ class PostgresGraphStore:
         query per hop, integer IDs only while expanding; labels are fetched
         just for the nodes kept. Over max_nodes, closer nodes win, then
         higher PageRank — every hop level is kept whole before the next is
-        touched, so the result stays connected."""
-        empty = {"nodes": [], "edges": [], "center_id": judgment_id, "total_nodes": 0, "truncated": False}
+        touched, so the result stays connected. That also means once a hop
+        level overshoots max_nodes nothing further out can be kept, so the
+        search stops there and total_nodes becomes a lower bound
+        (total_exact False) instead of expanding a landmark case's
+        neighbourhood by thousands of nodes only to drop them."""
+        empty = {
+            "nodes": [], "edges": [], "center_id": judgment_id, "total_nodes": 0, "total_exact": True, "truncated": False,
+        }
         with self._cursor() as cur:
             if not self._exists(cur, judgment_id):
                 return empty
 
             dist = {judgment_id: 0}
             frontier = [judgment_id]
+            total_exact = True
             for hop in range(1, depth + 1):
                 if not frontier:
+                    break
+                if len(dist) > max_nodes:
+                    total_exact = False
                     break
                 cur.execute(
                     f"SELECT source_judgment_id, target_judgment_id FROM citation_edges "
@@ -277,6 +287,7 @@ class PostgresGraphStore:
                 "court": info.get(n, {}).get("court"),
                 "date": info.get(n, {}).get("date"),
                 "is_center": n == judgment_id,
+                "hop": dist[n],
             }
             for n in keep
         ]
@@ -289,6 +300,7 @@ class PostgresGraphStore:
             "nodes": nodes,
             "edges": edges,
             "total_nodes": total_nodes,
+            "total_exact": total_exact,
             "truncated": truncated,
         }
 

@@ -151,6 +151,7 @@ class CitationGraphManager:
                 "edges": [],
                 "center_id": judgment_id,
                 "total_nodes": 0,
+                "total_exact": True,
                 "truncated": False,
             }
 
@@ -175,6 +176,7 @@ class CitationGraphManager:
                     "court": data.get("court"),
                     "date": data.get("date"),
                     "is_center": (n == judgment_id),
+                    "hop": dist[n],
                 }
             )
 
@@ -194,6 +196,7 @@ class CitationGraphManager:
             "nodes": nodes,
             "edges": edges,
             "total_nodes": total_nodes,
+            "total_exact": True,
             "truncated": truncated,
         }
 
