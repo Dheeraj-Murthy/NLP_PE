@@ -5,12 +5,15 @@ For each sampled judgment_chunks row, asks an LLM to write one
 natural-language question that chunk specifically answers. The chunk's own
 id becomes the ground-truth target that retrieval_eval.py checks for.
 
-This sends real judgment_chunks content to Anthropic's API, so --external-ok
-is required, the same opt-in gate rag_pipeline.py uses for external models.
+Uses the local Qwen model by default — same as the rest of this repo,
+nothing leaves the machine. Pass --model claude-*/gpt-*/gemini-* plus
+--external-ok to use an external API instead (same opt-in gate
+rag_pipeline.py's _resolve_backend uses for those backends).
 
 Usage:
     cd NLPv2/backend
-    python benchmark/generate_gold_set.py --n 80 --seed 42 --external-ok
+    python benchmark/generate_gold_set.py --n 80 --seed 42
+    python benchmark/generate_gold_set.py --n 80 --model claude-sonnet-5 --external-ok
 """
 import argparse
 import json
@@ -22,13 +25,13 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 
-# Add backend/ to the path so the dotted `llm.*` subpackage import below
-# resolves whether this script is run directly or as a module — same shim
+# Add backend/ to the path so the dotted `llm.*` subpackage imports below
+# resolve whether this script is run directly or as a module — same shim
 # as backend/tests/smoke_test_citation_graph.py.
 _backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _backend_dir)
 
-from llm.anthropic_backend import AnthropicBackend  # noqa: E402
+from llm.base import LLMBackend, PrivacyGateError  # noqa: E402
 
 SECTIONS = ["facts", "issues", "arguments", "ratio", "judgment"]
 MAX_CHUNKS_PER_JUDGMENT = 2
@@ -100,7 +103,40 @@ def sample_chunks(cur, n: int, seed: int) -> List[Dict[str, Any]]:
     return sampled[:n]
 
 
-def generate_question_for_chunk(backend: AnthropicBackend, chunk: Dict[str, Any]) -> str:
+def _resolve_backend(model: Optional[str], external_ok: bool, api_key: Optional[str]) -> LLMBackend:
+    """Same prefix-based dispatch as rag_pipeline.LegalRAGPipeline._resolve_backend,
+    standalone (no pipeline/DB-connected retriever needed to generate questions).
+    None/"qwen" -> local Qwen (default, nothing leaves the machine); claude-*/gpt-*/
+    o1*/o3*/gemini-* -> external API, gated behind --external-ok."""
+    if not model or model == "qwen":
+        from llm.qwen_backend import QwenBackend
+
+        return QwenBackend()
+
+    if model.startswith("claude-"):
+        from llm.anthropic_backend import AnthropicBackend
+
+        backend_cls = AnthropicBackend
+    elif model.startswith("gpt-") or model.startswith("o1") or model.startswith("o3"):
+        from llm.openai_backend import OpenAIBackend
+
+        backend_cls = OpenAIBackend
+    elif model.startswith("gemini-"):
+        from llm.gemini_backend import GeminiBackend
+
+        backend_cls = GeminiBackend
+    else:
+        raise ValueError(f"Unknown model: {model}")
+
+    if backend_cls.requires_external_ok and not external_ok:
+        raise PrivacyGateError(
+            f"Model '{model}' is an external API backend. Pass --external-ok to confirm "
+            f"sending judgment_chunks content to this provider."
+        )
+    return backend_cls(model_id=model, api_key=api_key) if api_key else backend_cls(model_id=model)
+
+
+def generate_question_for_chunk(backend: LLMBackend, chunk: Dict[str, Any]) -> str:
     gen = backend.generate(
         context_block=chunk["content"],
         user_query="Write the question now.",
@@ -119,7 +155,9 @@ def build_gold_record(chunk: Dict[str, Any], question: str, model_id: str) -> Di
     }
 
 
-def build_gold_set(n: int, seed: int, model: str, api_key: Optional[str]) -> List[Dict[str, Any]]:
+def build_gold_set(
+    n: int, seed: int, model: Optional[str], external_ok: bool, api_key: Optional[str]
+) -> List[Dict[str, Any]]:
     conn = psycopg2.connect(_default_db_connection_string())
     try:
         cur = conn.cursor()
@@ -130,7 +168,7 @@ def build_gold_set(n: int, seed: int, model: str, api_key: Optional[str]) -> Lis
     finally:
         conn.close()
 
-    backend = AnthropicBackend(model_id=model, api_key=api_key)
+    backend = _resolve_backend(model, external_ok, api_key)
     records = []
     for i, chunk in enumerate(chunks, 1):
         question = generate_question_for_chunk(backend, chunk)
@@ -152,22 +190,26 @@ def main() -> None:
         "wording, which can vary across runs even for the same chunk."
     )
     parser.add_argument(
-        "--model", type=str, default="claude-sonnet-5",
-        help="Anthropic model id used to write questions (default: claude-sonnet-5)",
+        "--model", type=str, default=None,
+        help="Model id used to write questions: omit for local Qwen (default), or "
+        "claude-*/gpt-*/gemini-* for an external backend",
     )
     parser.add_argument(
-        "--api-key", type=str, default=None, help="Overrides ANTHROPIC_API_KEY from .env"
+        "--external-ok", action="store_true",
+        help="Confirm sending judgment_chunks content to an external model API "
+        "(required with --model claude-*/gpt-*/gemini-*)",
     )
     parser.add_argument(
-        "--external-ok", action="store_true", required=True,
-        help="Confirm sending judgment_chunks content to Anthropic's API (required)",
+        "--api-key", type=str, default=None,
+        help="API key for an external model, overriding ANTHROPIC_API_KEY/OPENAI_API_KEY/"
+        "GEMINI_API_KEY from .env",
     )
     parser.add_argument(
         "--output", type=str, default=DEFAULT_OUTPUT, help="Output JSON path"
     )
     args = parser.parse_args()
 
-    records = build_gold_set(args.n, args.seed, args.model, args.api_key)
+    records = build_gold_set(args.n, args.seed, args.model, args.external_ok, args.api_key)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w") as f:
