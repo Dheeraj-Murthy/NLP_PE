@@ -62,6 +62,7 @@ def test_citation_graph_manager():
     path = gm.get_shortest_path(3, 1)
     print(f"Shortest path from Case #3 -> Case #1: {path}")
     assert path == [3, 1], "Path should be direct edge [3, 1]"
+    assert gm.get_shortest_path(1, 3) is None, "An older case can't lead to a newer one"
 
     # Test Mind Map
     tree = gm.get_mind_map(1, per_branch=1)

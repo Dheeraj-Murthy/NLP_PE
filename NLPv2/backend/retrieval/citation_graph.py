@@ -236,10 +236,28 @@ class CitationGraphManager:
         Find shortest citation chain between source and target judgments.
         """
         self._mem_load()
+        if source_id not in self.graph or target_id not in self.graph:
+            return None
+
+        # Same date pruning as PostgresGraphStore.shortest_path: a chain only
+        # runs back in time, so it stays between the target's date and the source's.
+        def date_of(n: int) -> Optional[str]:
+            d = str(self.graph.nodes[n].get("date") or "")
+            return d[:10] if len(d) >= 10 and d[4] == "-" else None
+
+        newest, oldest = date_of(source_id), date_of(target_id)
+        if newest and oldest and newest < oldest:
+            return None
+
+        def in_window(n: int) -> bool:
+            d = date_of(n)
+            return d is None or ((not oldest or d >= oldest) and (not newest or d <= newest))
 
         try:
-            return nx.shortest_path(self.graph, source=source_id, target=target_id)
-        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            return nx.bidirectional_shortest_path(
+                nx.subgraph_view(self.graph, filter_node=in_window), source_id, target_id
+            )
+        except nx.NetworkXNoPath:
             return None
 
     def _mem_centrality_scores(self) -> Dict[int, float]:

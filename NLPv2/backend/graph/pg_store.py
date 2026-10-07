@@ -307,13 +307,31 @@ class PostgresGraphStore:
     def shortest_path(self, source_id: int, target_id: int, max_hops: int = 12) -> Optional[List[int]]:
         """Shortest chain source -> ... -> target following citation
         direction. Bidirectional BFS, expanding the smaller frontier, one
-        query per level."""
+        query per level.
+
+        Pruned by date: a judgment only cites earlier ones, so every case on
+        a chain falls between the target's date and the source's. Cases
+        outside that window are never expanded, and a source older than its
+        target has no chain at all. Cases without a date are kept."""
         with self._cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM judgments WHERE id = ANY(%s)", ([source_id, target_id],))
-            if cur.fetchone()[0] < len({source_id, target_id}):
+            cur.execute("SELECT id, date_of_judgment FROM judgments WHERE id = ANY(%s)", ([source_id, target_id],))
+            dates = dict(cur.fetchall())
+            if len(dates) < len({source_id, target_id}):
                 return None
             if source_id == target_id:
                 return [source_id]
+
+            newest, oldest = dates[source_id], dates[target_id]
+            if newest is not None and oldest is not None and newest < oldest:
+                return None
+            # Applied to the case a step reaches (j); %s pairs are filled per query.
+            window, window_params = "", []
+            if oldest is not None:
+                window += " AND (j.date_of_judgment IS NULL OR j.date_of_judgment >= %s)"
+                window_params.append(oldest)
+            if newest is not None:
+                window += " AND (j.date_of_judgment IS NULL OR j.date_of_judgment <= %s)"
+                window_params.append(newest)
 
             fwd: Dict[int, Optional[int]] = {source_id: None}
             bwd: Dict[int, Optional[int]] = {target_id: None}
@@ -326,9 +344,10 @@ class PostgresGraphStore:
                 if len(fwd_frontier) <= len(bwd_frontier):
                     cur.execute(
                         f"SELECT source_judgment_id, target_judgment_id FROM citation_edges "
-                        f"WHERE {EDGE_FILTER} AND source_judgment_id = ANY(%s) "
+                        f"JOIN judgments j ON j.id = target_judgment_id "
+                        f"WHERE {EDGE_FILTER} AND source_judgment_id = ANY(%s){window} "
                         f"ORDER BY source_judgment_id, target_judgment_id",
-                        (fwd_frontier,),
+                        [fwd_frontier] + window_params,
                     )
                     nxt = []
                     for src, tgt in cur.fetchall():
@@ -341,9 +360,10 @@ class PostgresGraphStore:
                 else:
                     cur.execute(
                         f"SELECT source_judgment_id, target_judgment_id FROM citation_edges "
-                        f"WHERE {EDGE_FILTER} AND target_judgment_id = ANY(%s) "
+                        f"JOIN judgments j ON j.id = source_judgment_id "
+                        f"WHERE {EDGE_FILTER} AND target_judgment_id = ANY(%s){window} "
                         f"ORDER BY target_judgment_id, source_judgment_id",
-                        (bwd_frontier,),
+                        [bwd_frontier] + window_params,
                     )
                     nxt = []
                     for src, tgt in cur.fetchall():
