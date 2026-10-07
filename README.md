@@ -62,7 +62,7 @@ From another terminal (same venv), start the frontend:
 ```bash
 cd NLPv2/frontend/streamlit
 pip install -r requirements.txt
-RAG_API_URL=http://localhost:8000 streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+RAG_API_URL=http://localhost:8000 streamlit run Home.py --server.port 8501 --server.address 0.0.0.0
 ```
 
 Or, on a server where the venv already exists, `run.sh` does both of the

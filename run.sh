@@ -58,7 +58,7 @@ start() {
         (
             cd "$NLPV2_DIR/frontend/streamlit"
             RAG_API_URL=http://localhost:8000 \
-                nohup "$VENV_STREAMLIT" run app.py --server.port 8501 --server.address 0.0.0.0 \
+                nohup "$VENV_STREAMLIT" run Home.py --server.port 8501 --server.address 0.0.0.0 \
                 >> "$LOG_DIR/frontend.log" 2>&1 &
             echo $! > "$FRONTEND_PID_FILE"
         )

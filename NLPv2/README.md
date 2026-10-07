@@ -62,7 +62,7 @@ From another terminal (same venv), start the frontend:
 ```bash
 cd frontend/streamlit
 pip install -r requirements.txt
-RAG_API_URL=http://localhost:8000 streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+RAG_API_URL=http://localhost:8000 streamlit run Home.py --server.port 8501 --server.address 0.0.0.0
 ```
 
 Try a query from the CLI instead:
