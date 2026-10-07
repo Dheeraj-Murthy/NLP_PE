@@ -57,6 +57,19 @@ MAX_NON_ASCII_RATIO = 0.2  # skip chunks with garbled/mis-encoded PDF extraction
 MIN_QUESTION_OVERLAP = 0.25  # min fraction of non-trivial question words found in the chunk
 MAX_ATTEMPTS_PER_SECTION_MULTIPLIER = 4  # how many extra candidates to try per section before giving up
 
+# Near-duplicate detection: a gold query's chunk_id is only ONE of
+# possibly several chunks that equally answer it — e.g. formulaic
+# disposition language ("the appeal is dismissed with costs...") repeats
+# near-verbatim across thousands of unrelated judgments. Scoring only the
+# literal source chunk as "correct" then counts a retrieval that surfaces
+# an equally-valid near-duplicate as a miss, which isn't a retrieval
+# defect — it's a single-label gold set being unfair to a multi-answer
+# question. This threshold/limit pair controls how we detect that and
+# build the wider accepted-answer set, via a cosine self-join on the
+# chunk's own existing embedding (nothing re-encoded).
+NEAR_DUP_SIMILARITY_THRESHOLD = 0.92
+NEAR_DUP_FETCH_LIMIT = 50  # comfortably above stage-1 candidate_k=30 — no point tracking duplicates retrieval could never surface anyway
+
 GOLD_GEN_SYSTEM_PROMPT = (
     "You are generating evaluation data for a legal search system. Given an "
     "excerpt from the '{section}' portion of an Indian court judgment, write "
@@ -132,6 +145,32 @@ def _fetch_all_chunks(cur) -> List[Dict[str, Any]]:
     ]
 
 
+def _near_duplicate_chunk_ids(
+    cur, chunk_id: int, threshold: float = NEAR_DUP_SIMILARITY_THRESHOLD, limit: int = NEAR_DUP_FETCH_LIMIT
+) -> List[int]:
+    """Other chunks whose embedding is near-identical to chunk_id's own
+    embedding (self-join on judgment_embeddings, reusing the same
+    `embedding <=> embedding` cosine-distance pattern retriever.py uses
+    against a query embedding — here both sides are corpus chunks). These
+    are content-equivalent answers to whatever question chunk_id's content
+    generated, not just topically related chunks, so the threshold is set
+    high (0.92) on purpose. Capped at `limit` since nothing beyond the
+    stage-1 candidate pool size could ever be retrieved anyway."""
+    cur.execute(
+        """
+        SELECT je2.chunk_id
+        FROM judgment_embeddings je1
+        JOIN judgment_embeddings je2 ON je2.chunk_id != je1.chunk_id
+        WHERE je1.chunk_id = %s
+          AND 1 - (je2.embedding <=> je1.embedding) >= %s
+        ORDER BY je2.embedding <=> je1.embedding
+        LIMIT %s
+        """,
+        (chunk_id, threshold, limit),
+    )
+    return [r[0] for r in cur.fetchall()]
+
+
 def _corpus_counts(cur) -> Dict[str, int]:
     cur.execute("SELECT count(*) FROM judgments")
     judgment_count = cur.fetchone()[0]
@@ -197,7 +236,9 @@ def generate_question_for_chunk(backend: LLMBackend, chunk: Dict[str, Any]) -> s
     return gen.text.strip()
 
 
-def build_gold_record(chunk: Dict[str, Any], question: str, model_id: str) -> Dict[str, Any]:
+def build_gold_record(
+    chunk: Dict[str, Any], question: str, model_id: str, near_dup_ids: List[int]
+) -> Dict[str, Any]:
     return {
         "query": question,
         "source_chunk_id": chunk["chunk_id"],
@@ -205,11 +246,28 @@ def build_gold_record(chunk: Dict[str, Any], question: str, model_id: str) -> Di
         "section": chunk["section"],
         "content_hash": _content_hash(chunk["content"]),
         "generator_model": model_id,
+        # Equivalence class retrieval_eval.py scores against: the literal
+        # source chunk plus any near-duplicate found above. A match on ANY
+        # of these counts as a hit — see metrics.rank_of.
+        "acceptable_chunk_ids": [chunk["chunk_id"]] + near_dup_ids,
+        # How many OTHER chunks are near-identical to this one. High
+        # crowd_size (common for formulaic `judgment`-section disposition
+        # text) flags a query whose source chunk was never uniquely
+        # identifiable in the first place — a gold-set artifact, not a
+        # retrieval weakness. retrieval_eval.py reports recall split by
+        # this so the two don't get conflated.
+        "crowd_size": len(near_dup_ids),
     }
 
 
 def build_gold_set(
-    n: int, seed: int, model: Optional[str], external_ok: bool, api_key: Optional[str]
+    n: int,
+    seed: int,
+    model: Optional[str],
+    external_ok: bool,
+    api_key: Optional[str],
+    near_dup_threshold: float = NEAR_DUP_SIMILARITY_THRESHOLD,
+    near_dup_limit: int = NEAR_DUP_FETCH_LIMIT,
 ) -> Dict[str, Any]:
     conn = psycopg2.connect(_default_db_connection_string())
     try:
@@ -229,39 +287,66 @@ def build_gold_set(
 
     records: List[Dict[str, Any]] = []
     skipped_overlap = 0
-    for section in SECTIONS:
-        accepted = 0
-        attempts = 0
-        for chunk in by_section.get(section, []):
-            if accepted >= per_section or len(records) >= n or attempts >= max_attempts_per_section:
-                break
-            if judgment_counts[chunk["judgment_id"]] >= MAX_CHUNKS_PER_JUDGMENT:
-                continue
-            attempts += 1
+    crowded_count = 0
 
-            question = generate_question_for_chunk(backend, chunk)
-            overlap = _question_overlap(question, chunk["content"])
-            if overlap < MIN_QUESTION_OVERLAP:
-                skipped_overlap += 1
-                print(
-                    f"  [skip] chunk {chunk['chunk_id']} ({section}): overlap={overlap:.2f} "
-                    f"< {MIN_QUESTION_OVERLAP} — {question}"
-                )
-                continue
+    # Separate connection for near-duplicate lookups, opened only once an
+    # accepted question needs one — kept open across the loop rather than
+    # reopened per record, closed in the finally below.
+    dup_conn = psycopg2.connect(_default_db_connection_string())
+    try:
+        dup_cur = dup_conn.cursor()
+        try:
+            for section in SECTIONS:
+                accepted = 0
+                attempts = 0
+                for chunk in by_section.get(section, []):
+                    if accepted >= per_section or len(records) >= n or attempts >= max_attempts_per_section:
+                        break
+                    if judgment_counts[chunk["judgment_id"]] >= MAX_CHUNKS_PER_JUDGMENT:
+                        continue
+                    attempts += 1
 
-            judgment_counts[chunk["judgment_id"]] += 1
-            accepted += 1
-            records.append(build_gold_record(chunk, question, backend.model_id))
-            print(f"[{len(records)}/{n}] chunk {chunk['chunk_id']} ({section}, overlap={overlap:.2f}): {question}")
+                    question = generate_question_for_chunk(backend, chunk)
+                    overlap = _question_overlap(question, chunk["content"])
+                    if overlap < MIN_QUESTION_OVERLAP:
+                        skipped_overlap += 1
+                        print(
+                            f"  [skip] chunk {chunk['chunk_id']} ({section}): overlap={overlap:.2f} "
+                            f"< {MIN_QUESTION_OVERLAP} — {question}"
+                        )
+                        continue
+
+                    near_dup_ids = _near_duplicate_chunk_ids(
+                        dup_cur, chunk["chunk_id"], threshold=near_dup_threshold, limit=near_dup_limit
+                    )
+                    if near_dup_ids:
+                        crowded_count += 1
+
+                    judgment_counts[chunk["judgment_id"]] += 1
+                    accepted += 1
+                    records.append(build_gold_record(chunk, question, backend.model_id, near_dup_ids))
+                    print(
+                        f"[{len(records)}/{n}] chunk {chunk['chunk_id']} ({section}, overlap={overlap:.2f}, "
+                        f"crowd_size={len(near_dup_ids)}): {question}"
+                    )
+        finally:
+            dup_cur.close()
+    finally:
+        dup_conn.close()
 
     random.Random(seed).shuffle(records)
-    print(f"\n{len(records)} accepted, {skipped_overlap} skipped for low question/content overlap")
+    print(
+        f"\n{len(records)} accepted, {skipped_overlap} skipped for low question/content overlap, "
+        f"{crowded_count} with 1+ near-duplicate chunk (crowd_size > 0)"
+    )
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "generator_model": backend.model_id,
         "corpus_judgment_count": corpus_counts["judgment_count"],
         "corpus_chunk_count": corpus_counts["chunk_count"],
+        "near_dup_threshold": near_dup_threshold,
+        "near_dup_limit": near_dup_limit,
         "records": records,
     }
 
@@ -296,9 +381,21 @@ def main() -> None:
     parser.add_argument(
         "--output", type=str, default=DEFAULT_OUTPUT, help="Output JSON path"
     )
+    parser.add_argument(
+        "--near-dup-threshold", type=float, default=NEAR_DUP_SIMILARITY_THRESHOLD,
+        help=f"Cosine similarity above which another chunk counts as a near-duplicate "
+        f"answer to the same gold question (default: {NEAR_DUP_SIMILARITY_THRESHOLD})",
+    )
+    parser.add_argument(
+        "--near-dup-limit", type=int, default=NEAR_DUP_FETCH_LIMIT,
+        help=f"Max near-duplicate chunks to record per gold query (default: {NEAR_DUP_FETCH_LIMIT})",
+    )
     args = parser.parse_args()
 
-    gold_set = build_gold_set(args.n, args.seed, args.model, args.external_ok, args.api_key)
+    gold_set = build_gold_set(
+        args.n, args.seed, args.model, args.external_ok, args.api_key,
+        near_dup_threshold=args.near_dup_threshold, near_dup_limit=args.near_dup_limit,
+    )
 
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with open(args.output, "w") as f:

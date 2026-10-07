@@ -64,6 +64,22 @@ from metrics import aggregate, rank_of  # noqa: E402
 
 DEFAULT_K_VALUES = (5, 8, 10, 30)
 
+# A gold record with crowd_size >= this (see generate_gold_set.py's
+# near-duplicate detection) has at least this many OTHER chunks that are
+# near-identical to its source chunk — the question has no single
+# discriminating answer even in principle, which is a gold-set artifact
+# (formulaic disposition text repeating across unrelated judgments), not a
+# retrieval weakness. Default 1 means "any near-duplicate at all" counts.
+DEFAULT_CROWD_THRESHOLD = 1
+
+
+def _acceptable_chunk_ids(gold: Dict[str, Any]) -> List[Any]:
+    """The scoring equivalence class for a gold record's chunk-level
+    target: the literal source chunk plus any near-duplicate recorded at
+    gold-set generation time. Falls back to just the source chunk for a
+    gold set generated before acceptable_chunk_ids existed."""
+    return gold.get("acceptable_chunk_ids") or [gold["source_chunk_id"]]
+
 
 def _default_db_connection_string() -> str:
     """Build the default DSN from env vars — same convention as
@@ -153,21 +169,31 @@ def evaluate_query(
     stage2_judgment_ids: List[Any],
     k_values: Sequence[int],
 ) -> Dict[str, Any]:
-    target_chunk = gold["source_chunk_id"]
+    target_chunk = gold["source_chunk_id"]  # strict: literal source chunk only
+    target_chunk_set = _acceptable_chunk_ids(gold)  # multi-label: source + near-duplicates
     target_judgment = gold["source_judgment_id"]
     result: Dict[str, Any] = {
         "query": gold["query"],
         "source_chunk_id": target_chunk,
+        "acceptable_chunk_ids": target_chunk_set,
+        "crowd_size": gold.get("crowd_size", len(target_chunk_set) - 1),
         "source_judgment_id": target_judgment,
         "section": gold["section"],
-        "stage1_rank": rank_of(target_chunk, stage1_chunk_ids),
-        "stage2_rank": rank_of(target_chunk, stage2_chunk_ids),
+        # strict: scored against the literal source chunk only, pre-fix behavior
+        "stage1_rank_strict": rank_of(target_chunk, stage1_chunk_ids),
+        "stage2_rank_strict": rank_of(target_chunk, stage2_chunk_ids),
+        # multi-label: scored against source + near-duplicate equivalence class
+        "stage1_rank": rank_of(target_chunk_set, stage1_chunk_ids),
+        "stage2_rank": rank_of(target_chunk_set, stage2_chunk_ids),
         "stage1_judgment_rank": rank_of(target_judgment, stage1_judgment_ids),
         "stage2_judgment_rank": rank_of(target_judgment, stage2_judgment_ids),
     }
     for k in k_values:
         result[f"stage1_recall@{k}"] = int(result["stage1_rank"] is not None and result["stage1_rank"] <= k)
         result[f"stage2_recall@{k}"] = int(result["stage2_rank"] is not None and result["stage2_rank"] <= k)
+        result[f"stage2_recall@{k}_strict"] = int(
+            result["stage2_rank_strict"] is not None and result["stage2_rank_strict"] <= k
+        )
     return result
 
 
@@ -178,6 +204,7 @@ def run_eval(
     top_k: int = 8,
     graph_boost: float = 0.0,
     k_values: Sequence[int] = DEFAULT_K_VALUES,
+    crowd_threshold: int = DEFAULT_CROWD_THRESHOLD,
 ) -> Dict[str, Any]:
     records, gold_meta = load_gold_set(gold_path)
     k_values = sorted(set(k_values))
@@ -200,14 +227,34 @@ def run_eval(
     reranker = CrossEncoderReranker()
 
     per_query = []
+    # "_strict": scored against the literal source chunk only (old, pre-fix
+    # behavior — a near-duplicate correct chunk counts as a miss).
+    # Unqualified: scored against source + near-duplicate equivalence class
+    # (the multi-label fix). Comparing the two isolates how much of any
+    # recall gap is a gold-set labeling artifact vs. a real retrieval miss.
     stage1_pairs: List[Tuple[Any, List[Any]]] = []
+    stage1_strict_pairs: List[Tuple[Any, List[Any]]] = []
     stage2_pairs: List[Tuple[Any, List[Any]]] = []
+    stage2_strict_pairs: List[Tuple[Any, List[Any]]] = []
     stage1_judgment_pairs: List[Tuple[Any, List[Any]]] = []
     stage2_judgment_pairs: List[Tuple[Any, List[Any]]] = []
     section_stage1_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
+    section_stage1_strict_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
     section_stage2_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
+    section_stage2_strict_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
     section_stage1_judgment_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
     section_stage2_judgment_pairs: Dict[str, List[Tuple[Any, List[Any]]]] = defaultdict(list)
+    # Discriminability-gate diagnostic: same stage2 strict/multi-label
+    # pairs, bucketed by whether the gold record is "crowded" (crowd_size
+    # >= crowd_threshold, i.e. it has near-identical chunks elsewhere in
+    # the corpus — the formulaic `judgment`-section case) — per section,
+    # since that's where the effect is suspected to concentrate.
+    section_crowd_stage2_strict_pairs: Dict[str, Dict[str, List[Tuple[Any, List[Any]]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    section_crowd_stage2_pairs: Dict[str, Dict[str, List[Tuple[Any, List[Any]]]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
 
     start = time.time()
     for gold in valid_records:
@@ -218,17 +265,26 @@ def run_eval(
         stage2_chunk_ids = [c["chunk_id"] for c in stage2]
         stage1_judgment_ids = [c["judgment_id"] for c in stage1]
         stage2_judgment_ids = [c["judgment_id"] for c in stage2]
-        target_chunk = gold["source_chunk_id"]
+        target_chunk_strict = gold["source_chunk_id"]
+        target_chunk = _acceptable_chunk_ids(gold)
         target_judgment = gold["source_judgment_id"]
+        section = gold["section"]
+        crowd_bucket = "high_crowd" if gold.get("crowd_size", 0) >= crowd_threshold else "low_crowd"
 
         stage1_pairs.append((target_chunk, stage1_chunk_ids))
+        stage1_strict_pairs.append((target_chunk_strict, stage1_chunk_ids))
         stage2_pairs.append((target_chunk, stage2_chunk_ids))
+        stage2_strict_pairs.append((target_chunk_strict, stage2_chunk_ids))
         stage1_judgment_pairs.append((target_judgment, stage1_judgment_ids))
         stage2_judgment_pairs.append((target_judgment, stage2_judgment_ids))
-        section_stage1_pairs[gold["section"]].append((target_chunk, stage1_chunk_ids))
-        section_stage2_pairs[gold["section"]].append((target_chunk, stage2_chunk_ids))
-        section_stage1_judgment_pairs[gold["section"]].append((target_judgment, stage1_judgment_ids))
-        section_stage2_judgment_pairs[gold["section"]].append((target_judgment, stage2_judgment_ids))
+        section_stage1_pairs[section].append((target_chunk, stage1_chunk_ids))
+        section_stage1_strict_pairs[section].append((target_chunk_strict, stage1_chunk_ids))
+        section_stage2_pairs[section].append((target_chunk, stage2_chunk_ids))
+        section_stage2_strict_pairs[section].append((target_chunk_strict, stage2_chunk_ids))
+        section_stage1_judgment_pairs[section].append((target_judgment, stage1_judgment_ids))
+        section_stage2_judgment_pairs[section].append((target_judgment, stage2_judgment_ids))
+        section_crowd_stage2_pairs[section][crowd_bucket].append((target_chunk, stage2_chunk_ids))
+        section_crowd_stage2_strict_pairs[section][crowd_bucket].append((target_chunk_strict, stage2_chunk_ids))
 
         per_query.append(
             evaluate_query(gold, stage1_chunk_ids, stage2_chunk_ids, stage1_judgment_ids, stage2_judgment_ids, k_values)
@@ -239,9 +295,26 @@ def run_eval(
         section: {
             "n": len(section_stage1_pairs[section]),
             "stage1": aggregate(section_stage1_pairs[section], k_values),
+            "stage1_strict": aggregate(section_stage1_strict_pairs[section], k_values),
             "stage2": aggregate(section_stage2_pairs[section], k_values),
+            "stage2_strict": aggregate(section_stage2_strict_pairs[section], k_values),
             "stage1_judgment": aggregate(section_stage1_judgment_pairs[section], k_values),
             "stage2_judgment": aggregate(section_stage2_judgment_pairs[section], k_values),
+            # Discriminability-gate diagnostic: stage2 chunk recall split
+            # by crowd bucket, strict vs multi-label. If high_crowd's
+            # "stage2_strict" recall is far below its "stage2" (multi-label)
+            # recall, the gap is a gold-set labeling artifact (formulaic
+            # text with many valid equivalent answers), not a retrieval
+            # weakness — see generate_gold_set.py's near-duplicate detection.
+            "crowd_breakdown": {
+                bucket: {
+                    "n": len(section_crowd_stage2_pairs[section][bucket]),
+                    "stage2_strict": aggregate(section_crowd_stage2_strict_pairs[section][bucket], k_values),
+                    "stage2": aggregate(section_crowd_stage2_pairs[section][bucket], k_values),
+                }
+                for bucket in ("low_crowd", "high_crowd")
+                if section_crowd_stage2_pairs[section][bucket]
+            },
         }
         for section in section_stage1_pairs
     }
@@ -253,6 +326,7 @@ def run_eval(
             "top_k": top_k,
             "graph_boost": graph_boost,
             "k_values": k_values,
+            "crowd_threshold": crowd_threshold,
             "n_queries": len(valid_records),
             "n_stale": len(stale_records),
             "elapsed_s": round(elapsed, 2),
@@ -266,7 +340,9 @@ def run_eval(
         "per_query": per_query,
         "per_section": per_section,
         "aggregate_stage1_chunk": aggregate(stage1_pairs, k_values),
+        "aggregate_stage1_chunk_strict": aggregate(stage1_strict_pairs, k_values),
         "aggregate_stage2_chunk": aggregate(stage2_pairs, k_values),
+        "aggregate_stage2_chunk_strict": aggregate(stage2_strict_pairs, k_values),
         "aggregate_stage1_judgment": aggregate(stage1_judgment_pairs, k_values),
         "aggregate_stage2_judgment": aggregate(stage2_judgment_pairs, k_values),
     }
@@ -276,7 +352,11 @@ def _flatten_for_mlflow(report: Dict[str, Any]) -> Dict[str, float]:
     # mlflow metric names don't allow "@" — rewrite recall@8 -> recall_at_8
     # for the logged metrics; the JSON report keeps the readable "@" form.
     flat: Dict[str, float] = {"n_stale": report["config"]["n_stale"]}
-    for block_name in ("aggregate_stage1_chunk", "aggregate_stage2_chunk", "aggregate_stage1_judgment", "aggregate_stage2_judgment"):
+    for block_name in (
+        "aggregate_stage1_chunk", "aggregate_stage1_chunk_strict",
+        "aggregate_stage2_chunk", "aggregate_stage2_chunk_strict",
+        "aggregate_stage1_judgment", "aggregate_stage2_judgment",
+    ):
         prefix = block_name.replace("aggregate_", "")
         for k, v in report[block_name].items():
             flat[f"{prefix}_{k}".replace("@", "_at_")] = v
@@ -318,10 +398,18 @@ def main() -> None:
         "--output", type=str, default=None,
         help="Output JSON report path (default: benchmark/reports/retrieval_eval_<timestamp>.json)",
     )
+    parser.add_argument(
+        "--crowd-threshold", type=int, default=DEFAULT_CROWD_THRESHOLD,
+        help=f"Min crowd_size (near-duplicate count) for a gold record to be bucketed "
+        f"'high_crowd' in the discriminability-gate breakdown (default: {DEFAULT_CROWD_THRESHOLD})",
+    )
     args = parser.parse_args()
 
     k_values = [int(x) for x in args.k_values.split(",")]
-    report = run_eval(args.gold, args.candidate_k, args.threshold, args.top_k, args.graph_boost, k_values)
+    report = run_eval(
+        args.gold, args.candidate_k, args.threshold, args.top_k, args.graph_boost, k_values,
+        crowd_threshold=args.crowd_threshold,
+    )
 
     output = args.output
     if output is None:
@@ -348,20 +436,35 @@ def main() -> None:
         print(f"Note: corpus has {cur_chunk_count} chunks now vs {gen_chunk_count} when the gold set was generated.\n")
 
     print(f"Config: {report['config']}\n")
-    _print_block("Stage 1 (pre-rerank) — chunk-level:", report["aggregate_stage1_chunk"])
+    _print_block("Stage 1 (pre-rerank) — chunk-level (multi-label):", report["aggregate_stage1_chunk"])
+    _print_block("Stage 1 (pre-rerank) — chunk-level (strict, source chunk only):", report["aggregate_stage1_chunk_strict"])
     _print_block("\nStage 1 (pre-rerank) — judgment-level (right case, any chunk):", report["aggregate_stage1_judgment"])
-    _print_block("\nStage 2 (post-rerank, final top_k) — chunk-level:", report["aggregate_stage2_chunk"])
+    _print_block("\nStage 2 (post-rerank, final top_k) — chunk-level (multi-label):", report["aggregate_stage2_chunk"])
+    _print_block("Stage 2 (post-rerank, final top_k) — chunk-level (strict, source chunk only):", report["aggregate_stage2_chunk_strict"])
     _print_block("\nStage 2 (post-rerank, final top_k) — judgment-level:", report["aggregate_stage2_judgment"])
 
-    print("\nPer-section (stage 2, final top_k) — chunk-level vs judgment-level:")
+    print("\nPer-section (stage 2, final top_k) — chunk-level (multi-label vs strict) vs judgment-level:")
     for section, block in sorted(report["per_section"].items()):
         s2 = block["stage2"]
+        s2_strict = block["stage2_strict"]
         s2j = block["stage2_judgment"]
         print(
             f"  {section} (n={block['n']}): "
-            f"chunk recall@{args.top_k}={s2.get(f'recall@{args.top_k}', float('nan')):.3f} mrr={s2.get('mrr', float('nan')):.3f}  |  "
+            f"chunk recall@{args.top_k}={s2.get(f'recall@{args.top_k}', float('nan')):.3f} "
+            f"(strict={s2_strict.get(f'recall@{args.top_k}', float('nan')):.3f}) mrr={s2.get('mrr', float('nan')):.3f}  |  "
             f"judgment recall@{args.top_k}={s2j.get(f'recall@{args.top_k}', float('nan')):.3f} mrr={s2j.get('mrr', float('nan')):.3f}"
         )
+
+    print(f"\nDiscriminability-gate breakdown (crowd_threshold={args.crowd_threshold}) — stage 2 chunk recall@{args.top_k}, multi-label vs strict:")
+    for section, block in sorted(report["per_section"].items()):
+        for bucket_name, bucket in sorted(block["crowd_breakdown"].items()):
+            s2 = bucket["stage2"]
+            s2_strict = bucket["stage2_strict"]
+            print(
+                f"  {section} / {bucket_name} (n={bucket['n']}): "
+                f"recall@{args.top_k}={s2.get(f'recall@{args.top_k}', float('nan')):.3f} "
+                f"(strict={s2_strict.get(f'recall@{args.top_k}', float('nan')):.3f})"
+            )
 
     print(f"\nWrote report to {output}")
 
