@@ -1,6 +1,7 @@
 import streamlit as st
 
 from lib import api_client
+from lib.case_graph import answer_cases, render_case_graph_panel
 from lib.ui_helpers import (
     confidence_badge,
     render_api_error,
@@ -41,6 +42,7 @@ if submitted and query_text.strip():
                     model=model, external_ok=external_ok, api_key=api_key,
                 )
                 st.session_state.last_query_result = data
+                st.session_state.pop("query_graph_on", None)  # a new answer starts with the graph closed
             except Exception as e:
                 render_api_error(e)
                 st.session_state.last_query_result = None
@@ -66,6 +68,14 @@ elif result:
 
     st.space("medium")
     render_precedent_chains(result.get("precedent_chains", []))
+
+    cases = answer_cases(result)
+    if cases:
+        st.space("medium")
+        st.subheader("Graph the cited cases", icon=":material/hub:")
+        st.caption("Draw the citation graph or full network of the cases this answer relies on, "
+                   "or the precedent path between two of them.")
+        render_case_graph_panel(cases, key="query_graph")
 
     if result.get("debug"):
         with st.expander("Debug info", icon=":material/bug_report:"):

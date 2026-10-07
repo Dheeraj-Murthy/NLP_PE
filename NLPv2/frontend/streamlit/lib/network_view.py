@@ -173,11 +173,13 @@ function layout() {
     });
   }
   for (const n of G.nodes) {
-    const strong = n === center ? COLORS.center : COLORS[n.side] || COLORS.other;
+    // Other chosen cases (a network of several) are drawn like the centre wherever they land.
+    const chosen = n === center || n.is_center;
+    const strong = chosen ? COLORS.center : COLORS[n.side] || COLORS.other;
     // The case and its direct citations are filled; further cases are outlined in their wedge's colour.
-    n.fill = n.hop <= 1 ? strong : v("--bg");
+    n.fill = n.hop <= 1 || chosen ? strong : v("--bg");
     n.stroke = strong;
-    n.ink = n.hop <= 1 ? "#FFFFFF" : v("--text");
+    n.ink = n.hop <= 1 || chosen ? "#FFFFFF" : v("--text");
   }
 }
 

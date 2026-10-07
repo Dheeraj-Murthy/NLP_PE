@@ -3,6 +3,7 @@ import json
 import streamlit as st
 
 from lib import api_client
+from lib.case_graph import render_answer_graph
 from lib.ui_helpers import (
     confidence_badge,
     init_session_state,
@@ -200,7 +201,7 @@ if not st.session_state.chat_history:
         st.session_state.pending_input = selected
         st.rerun()
 
-for turn in st.session_state.chat_history:
+for i, turn in enumerate(st.session_state.chat_history):
     with st.chat_message(turn["role"]):
         st.markdown(turn["content"])
         if turn["role"] == "assistant":
@@ -213,6 +214,7 @@ for turn in st.session_state.chat_history:
                 confidence_badge(turn["confidence"])
             render_context_note(turn.get("context"))
             render_sectioned_sources_and_citations(turn)
+            render_answer_graph(turn, key=f"chat_graph_{chat_id}_{i}")
             if turn.get("debug"):
                 with st.expander("Debug info", icon=":material/bug_report:"):
                     st.json(turn["debug"])
@@ -279,6 +281,8 @@ if user_input:
                 confidence_badge(confidence)
             render_context_note(data.get("context"))
             render_sectioned_sources_and_citations(data)
+            # Same key it gets in the history loop once appended below.
+            render_answer_graph(data, key=f"chat_graph_{chat_id}_{len(st.session_state.chat_history)}")
             if data.get("debug"):
                 with st.expander("Debug info", icon=":material/bug_report:"):
                     st.json(data["debug"])

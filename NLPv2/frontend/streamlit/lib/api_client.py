@@ -244,7 +244,8 @@ def graph_path(source_id: int, target_id: int) -> Optional[List[int]]:
     except requests.RequestException as e:
         raise LegalRAGAPIError(str(e)) from e
 
-    resp.raise_for_status()
+    if not resp.ok:
+        _handle_response(resp)
     payload = resp.json()
     if not payload.get("success"):
         return None

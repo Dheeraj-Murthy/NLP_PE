@@ -1,6 +1,7 @@
 import streamlit as st
 
 from lib import api_client
+from lib.case_graph import case_label, render_case_graph_panel, render_path, selected_cases
 from lib.mind_map import render_mind_map
 from lib.network_view import render_network
 from lib.ui_helpers import linked_label, render_api_error
@@ -82,6 +83,15 @@ def _network_page(judgment_id: int, direction: str, relationship, q, court, offs
     )
 
 
+def _graph_selected(cases, key: str) -> None:
+    """Graph controls for the rows selected in a table above."""
+    if cases:
+        render_case_graph_panel(cases, key=key, pick=False)
+    else:
+        st.caption(":material/touch_app: Select rows in the table to draw their citation graph, full network "
+                   "or the precedent path between two of them.")
+
+
 def _network_table(judgment_id: int, n_cites: int, n_cited_by: int) -> None:
     """Every case around the judgment, searchable and filterable, for
     neighbourhoods too big to read off the mind map."""
@@ -118,11 +128,15 @@ def _network_table(judgment_id: int, n_cites: int, n_cited_by: int) -> None:
         return
 
     with st.spinner("Rendering table…"):
-        st.dataframe(
+        event = st.dataframe(
             page["items"],
             column_order=["judgment_id", "label", "relationship", "court", "date", "pagerank_score", "cited_text"],
             width="stretch",
             hide_index=True,
+            on_select="rerun",
+            selection_mode="multi-row",
+            # A new page or filter is a new table: drop the old selection.
+            key=f"net_table_{hash(filters)}_{offset}",
         )
     with st.container(horizontal=True):
         st.button(
@@ -146,6 +160,7 @@ def _network_table(judgment_id: int, n_cites: int, n_cited_by: int) -> None:
         on_change=_focus_from,
         args=("net_open", choices, True),
     )
+    _graph_selected(selected_cases(page["items"], event), key="net_graph")
 
 
 query = st.text_input(
@@ -244,10 +259,13 @@ with tab_landmarks:
 
     selected_judgment_id = None
     if landmarks:
-        st.dataframe(
+        landmark_event = st.dataframe(
             landmarks,
             column_order=["judgment_id", "label", "court", "date", "in_degree", "pagerank_score"],
             width="stretch",
+            on_select="rerun",
+            selection_mode="multi-row",
+            key=f"landmark_table_{limit}",
         )
         options = {f"{c['label']} (#{c['judgment_id']})": c["judgment_id"] for c in landmarks}
         focus_options = {k: (v, k.rsplit(" (#", 1)[0]) for k, v in options.items()}
@@ -260,6 +278,7 @@ with tab_landmarks:
         )
         if picked != "—":
             selected_judgment_id = options[picked]
+        _graph_selected(selected_cases(landmarks, landmark_event), key="landmark_graph")
     else:
         st.caption("No landmark cases returned — citation graph may be empty.")
 
@@ -331,6 +350,7 @@ with tab_neighbors:
 
     st.markdown(linked_label(f"Open judgment #{int(center_id)}", {"judgment_id": int(center_id)}))
 
+    neighbor_selection = []
     col_cites, col_cited_by = st.columns(2)
     for col, direction, title in (
         (col_cites, "cites", "Cites"),
@@ -349,12 +369,16 @@ with tab_neighbors:
             if not page["items"]:
                 st.caption("None found.")
                 continue
-            st.dataframe(
+            event = st.dataframe(
                 page["items"],
                 column_order=["judgment_id", "label", "relationship", "date", "pagerank_score"],
                 width="stretch",
                 hide_index=True,
+                on_select="rerun",
+                selection_mode="multi-row",
+                key=f"{direction}_table_{int(center_id)}_{offset}",
             )
+            neighbor_selection += selected_cases(page["items"], event)
             with st.container(horizontal=True):
                 if st.button("Previous", key=f"{direction}_prev", disabled=offset == 0):
                     st.session_state[offset_key] = max(0, offset - NEIGHBOR_PAGE)
@@ -371,19 +395,28 @@ with tab_neighbors:
                 on_change=_focus_from,
                 args=(f"{direction}_open", choices, True),
             )
+    # Selections from both tables, without repeats.
+    _graph_selected(list(dict(neighbor_selection).items()), key="neighbor_graph")
 
 with tab_path:
-    st.caption("Shortest citation chain between two judgments.")
+    st.caption(
+        "Shortest citation chain between two judgments — each case in the chain cites the next. "
+        "Both directions are tried, so the order doesn't matter."
+    )
     with st.container(horizontal=True):
-        source_id = st.number_input("Source judgment ID", min_value=1, value=1, step=1, key="src")
-        target_id = st.number_input("Target judgment ID", min_value=1, value=2, step=1, key="tgt")
+        source_id = st.number_input(
+            "From judgment ID", min_value=1, value=st.session_state["graph_focus"], step=1,
+            placeholder="Search above or type an ID", key=f"src_{st.session_state['graph_focus']}",
+        )
+        target_id = st.number_input("To judgment ID", min_value=1, value=None, step=1,
+                                    placeholder="Type an ID", key="tgt")
+    ends = [int(i) for i in (source_id, target_id) if i is not None]
+    if ends:
+        st.caption(" ↔ ".join(f"{case_label(i)} (#{i})" for i in ends))
 
-    if st.button("Find path", icon=":material/route:", type="primary"):
-        try:
-            path = api_client.graph_path(int(source_id), int(target_id))
-            if path is None:
-                st.warning("No citation path found between these cases.", icon=":material/search_off:")
-            else:
-                st.success(" → ".join(str(p) for p in path), icon=":material/check_circle:")
-        except Exception as e:
-            render_api_error(e)
+    if st.button("Find path", icon=":material/route:", type="primary", disabled=len(ends) < 2):
+        st.session_state["path_ends"] = tuple(ends)
+    # Kept in session state so the result survives reruns from other widgets on the page.
+    path_ends = st.session_state.get("path_ends")
+    if path_ends:
+        render_path(*((jid, case_label(jid)) for jid in path_ends))
