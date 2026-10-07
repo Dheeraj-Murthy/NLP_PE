@@ -44,7 +44,7 @@ making something up.
 docker compose -f deploy/docker/docker-compose.yml up -d
 ```
 
-Spins up Postgres (`5432`), the API (`8000`), and the Streamlit frontend
+Spins up Postgres (`5433`), the API (`8000`), and the Streamlit frontend
 (`3000`). Or set it up manually — from this directory, with a venv active:
 
 ```bash

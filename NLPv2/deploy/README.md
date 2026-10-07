@@ -8,7 +8,7 @@
 
 # Environment variables (or set in .env)
 export DB_HOST=your_postgres_host
-export DB_PORT=5432
+export DB_PORT=5433
 export DB_NAME=legal_rag
 export DB_USER=postgres
 export DB_PASSWORD=your_password
@@ -49,7 +49,7 @@ cd deploy/run_model
 | Variable | Default | Description |
 |----------|---------|-------------|
 | DB_HOST | localhost | PostgreSQL host |
-| DB_PORT | 5432 | PostgreSQL port |
+| DB_PORT | 5433 | PostgreSQL port |
 | DB_NAME | legal_rag | Database name |
 | DB_USER | postgres | DB username |
 | DB_PASSWORD | postgres | DB password |
@@ -83,7 +83,7 @@ docker-compose down
 
 | Service | Port | Description |
 |---------|------|-------------|
-| postgres | 5432 | PostgreSQL with pgvector |
+| postgres | 5433 | PostgreSQL with pgvector |
 | api | 8000 | FastAPI backend |
 | frontend | 3000 | Streamlit UI |
 

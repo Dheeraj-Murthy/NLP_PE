@@ -37,7 +37,7 @@ METRICS_PATH = Path(__file__).resolve().parent / "outputs" / "graph_stats_metric
 def get_db_connection():
     return psycopg2.connect(
         host=os.getenv("DB_HOST", "localhost"),
-        port=os.getenv("DB_PORT", "5432"),
+        port=os.getenv("DB_PORT", "5433"),
         dbname=os.getenv("DB_NAME", "legal_rag"),
         user=os.getenv("DB_USER", "postgres"),
         password=os.getenv("DB_PASSWORD", "postgres"),

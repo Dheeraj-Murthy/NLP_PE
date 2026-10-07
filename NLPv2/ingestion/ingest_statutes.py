@@ -45,7 +45,7 @@ EMBED_BATCH = 128
 
 def _default_dsn() -> str:
     host = os.environ.get("DB_HOST", "localhost")
-    port = os.environ.get("DB_PORT", "5432")
+    port = os.environ.get("DB_PORT", "5433")
     dbname = os.environ.get("DB_NAME", "legal_rag")
     user = os.environ.get("DB_USER", "postgres")
     password = os.environ.get("DB_PASSWORD", "postgres")
