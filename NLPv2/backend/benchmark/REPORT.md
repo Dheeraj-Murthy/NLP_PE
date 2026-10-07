@@ -121,3 +121,124 @@ python benchmark/retrieval_eval.py --gold benchmark/data/gold_set.json
 
 Full per-query data and config are in
 `benchmark/reports/retrieval_eval_20261006_135715.json`.
+
+---
+
+## Update (2026-10-07): multi-label scoring, discriminability gate, and a reproducibility problem
+
+Follow-up to issue #11 ("improve benchmarking technique"). Goal was to make
+the *benchmark* more representative — nothing in the retrieval/reranking
+pipeline changed. Two changes went into the benchmark code, then both were
+tested against fresh runs, which surfaced a bigger problem than either
+change was looking for.
+
+### What changed
+
+1. **`generate_gold_set.py` — near-duplicate detection.** Each accepted
+   gold record now also records `acceptable_chunk_ids` (the source chunk
+   plus any other chunk whose embedding is ≥`NEAR_DUP_SIMILARITY_THRESHOLD`
+   cosine-similar, default 0.92, via a self-join on `judgment_embeddings` —
+   no re-encoding) and `crowd_size` (how many near-duplicates were found).
+   This targets Known Issue 3 above: a single-literal-chunk gold label
+   unfairly scores a retrieval that surfaces an equally-correct
+   near-duplicate chunk as a miss. Configurable via `--near-dup-threshold`
+   / `--near-dup-limit`.
+2. **`metrics.py` / `retrieval_eval.py` — multi-label + strict scoring,
+   side by side.** `rank_of` (and everything built on it) now accepts
+   either a single id (old behavior, unchanged) or a set of ids scored as
+   one equivalence class. `retrieval_eval.py` reports both: `_strict`
+   (literal source chunk only, the old metric) and the unmarked
+   multi-label version, plus a **discriminability-gate breakdown** —
+   stage-2 chunk recall split by `low_crowd` (`crowd_size` 0) vs
+   `high_crowd` (`crowd_size` ≥ `--crowd-threshold`, default 1) per
+   section, strict vs multi-label side by side. This is also what finally
+   produced the per-section *judgment-level* breakdown flagged as a
+   pending "next step" above.
+
+### Run 1 — fresh gold set, seed 1 (not the original's seed)
+
+`generate_gold_set.py --n 80 --seed 1`: 80 accepted, 1 skipped for low
+overlap, 13/80 got 1+ near-duplicate. One outlier: chunk 612131
+(`judgment` section, "did the appellate court find sufficient compelling
+and substantial reasons to interfere with the order of acquittal...") had
+`crowd_size=22` — strongly consistent with the "formulaic disposition
+language repeats across unrelated cases" theory from Known Issue 2 above.
+
+`retrieval_eval.py` results (stage 2, top_k=8):
+
+| | recall@8 strict | recall@8 multi-label | Δ |
+|---|---|---|---|
+| Overall chunk | 0.562 | 0.575 | +1.3pp |
+| `judgment` section chunk | 0.375 | 0.438 | +6.3pp |
+
+The one near-duplicate credit (chunk 612131) flipped from miss to hit and
+accounts for the entire `judgment`-section delta (1/16 = 0.0625). The
+other 15/16 `judgment` queries had `crowd_size=0` and were unaffected —
+so the fix is real but only explains a fraction of that section's
+weakness, not all of it.
+
+### Run 2 — regenerated gold set, seed 42 (same seed as the original baseline above)
+
+This was meant to be a clean before/after on the *same* 80 queries this
+report's original baseline used. It wasn't, and that's the finding.
+
+`generate_gold_set.py --n 80 --seed 42`: 80 accepted, 0 skipped for
+overlap, 7/80 crowded. Outlier this time: chunk 611087 (`judgment`
+section, Section 24(2) land-acquisition lapse question), `crowd_size=21`
+— same pattern as Run 1's outlier, different chunk.
+
+`retrieval_eval.py` results — **per-section chunk recall@8, strict**,
+compared directly against this report's original table:
+
+| section | original (2026-10-06, seed 42) | this run (2026-10-07, same seed 42) | Δ |
+|---|---|---|---|
+| arguments | 0.750 | 0.625 | −12.5pp |
+| facts | 0.562 | 0.562 | 0pp |
+| issues | 0.562 | 0.625 | +6.3pp |
+| ratio | 0.500 | 0.750 | +25pp |
+| **judgment** | **0.250** | **0.625** | **+37.5pp** |
+
+Same seed, same corpus, and `judgment` goes from the worst section by a
+wide margin to tied-for-best. `ratio` swings 25pp the other way. Only
+`facts` held still. The multi-label fix contributed ~nothing to this
+swing — every row in Run 2's discriminability-gate breakdown has
+strict == multi-label, because the few crowded buckets this run are
+n=1–2 and in `judgment`'s one high-crowd case the near-duplicate wasn't
+retrieved either way (0.000 strict, 0.000 multi-label).
+
+**Suspected cause**: `--seed` only fixes the order chunks are drawn from
+the candidate pool, not the LLM's question wording (noted in
+`generate_gold_set.py`'s own `--seed` help text). Since a question's
+accept/reject gate depends on word-overlap with that wording, two
+"same-seed" runs can end up accepting a different subset of 16 chunks per
+section. This is a hypothesis, not confirmed — the original run's exact
+chunk-id list wasn't preserved to diff against directly — but it's
+consistent with everything observed, and no other variable changed
+between the two runs.
+
+### Conclusion: the per-section breakdown isn't reliable at n=80
+
+**This report's original claim that the `judgment` section is
+"dramatically worse" than the others (Known Issue 2) does not replicate**
+under a same-seed regeneration, and should not be treated as an
+established property of the pipeline or corpus. At n=16 per section, one
+or two chunks swapping in or out moves recall@8 by 6–12pp each — enough
+on its own to flip which section looks weakest. The multi-label fix and
+discriminability gate above are still methodologically correct (they fix
+a real single-label-scoring unfairness), but n=80 is too small to say
+whether they've closed the `judgment`-section gap or not — in Run 2
+there was effectively no gap left to close.
+
+### Updated next steps
+
+- The per-section judgment-level breakdown planned above is now
+  implemented (see `crowd_breakdown` / `per_section.*.stage2_judgment` in
+  `retrieval_eval.py`'s report JSON) — superseded as a to-do.
+- **Increase n substantially** (e.g. 300–400 total, or oversample
+  specifically where `crowd_size` ≥ 1 cases are rare) and/or **run
+  multiple seeds and report the per-section mean ± spread**, not a single
+  run's point estimate, before drawing any conclusion about which section
+  or retrieval path is weak. This is now the priority gap in the
+  benchmarking technique — bigger than either fix made in this update.
+- Corpus corruption re-scan (corrected non-ASCII threshold) is still
+  outstanding, unrelated to the above.
